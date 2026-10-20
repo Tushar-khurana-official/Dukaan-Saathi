@@ -1,0 +1,295 @@
+import React, { useState } from 'react';
+import { Header } from './components/common/Header';
+import { Navigation, NavTab } from './components/common/Navigation';
+import { UndoToast } from './components/common/UndoToast';
+import { DemoGuideModal } from './components/common/DemoGuideModal';
+import { ConsentModal } from './components/common/ConsentModal';
+import { UpiQrModal } from './components/common/UpiQrModal';
+
+import { HomeDashboard } from './components/home/HomeDashboard';
+import { AssistantChat } from './components/assistant/AssistantChat';
+import { KhataScreen } from './components/khata/KhataScreen';
+import { RemindersScreen } from './components/reminders/RemindersScreen';
+import { StockScreen } from './components/stock/StockScreen';
+import { InsightsScreen } from './components/insights/InsightsScreen';
+import { SettingsScreen } from './components/settings/SettingsScreen';
+
+import { useLedger } from './hooks/useLedger';
+import { useStock } from './hooks/useStock';
+import { Language } from './types';
+
+export default function App() {
+  const {
+    profile,
+    setProfile,
+    customers,
+    transactions,
+    reminders,
+    customerBalances,
+    totalUdhaar,
+    todayRecovery,
+    overdueCustomers,
+    topDebtors,
+    cashFlow7Days,
+    lastAction,
+    addTransaction,
+    undoLastTransaction,
+    clearUndo,
+    addCustomer,
+    updateCustomer,
+    deleteCustomer,
+    logReminder,
+    resetToDemo: resetLedgerToDemo,
+    exportData,
+    importData,
+  } = useLedger();
+
+  const {
+    catalog,
+    scans,
+    reorderList,
+    lowStockProducts,
+    outOfStockProducts,
+    compareWithPreviousScan,
+    addScan,
+    updateProduct,
+    addProduct,
+    addToReorder,
+    updateReorderQty,
+    removeFromReorder,
+    clearReorder,
+    populateReorderFromLowStock,
+    exportReorderCsv,
+    resetStockToDemo,
+  } = useStock();
+
+  const [currentTab, setCurrentTab] = useState<NavTab>('home');
+  const [isDemoGuideOpen, setIsDemoGuideOpen] = useState(false);
+  const [externalVoiceTrigger, setExternalVoiceTrigger] = useState(false);
+
+  // UPI QR Modal state
+  const [upiQrState, setUpiQrState] = useState<{
+    isOpen: boolean;
+    customerName: string;
+    customerPhone: string;
+    amount: number;
+  }>({
+    isOpen: false,
+    customerName: 'Sharma Ji',
+    customerPhone: '9811234567',
+    amount: 1200,
+  });
+
+  const handleLanguageChange = (lang: Language) => {
+    setProfile({ ...profile, language: lang });
+  };
+
+  const handleOpenUpiQr = (customerName: string, customerPhone: string, amount: number) => {
+    setUpiQrState({
+      isOpen: true,
+      customerName,
+      customerPhone,
+      amount: Math.max(1, amount),
+    });
+  };
+
+  // Demo step runner from the Demo Guide modal
+  const handleRunDemoStep = (stepIndex: number) => {
+    if (stepIndex === 0) {
+      // Step 1: Voice Khata Entry
+      setCurrentTab('assistant');
+      setExternalVoiceTrigger(true);
+    } else if (stepIndex === 1) {
+      // Step 2: Query balance
+      setCurrentTab('assistant');
+    } else if (stepIndex === 2) {
+      // Step 3: Scan Shelf
+      setCurrentTab('stock');
+    } else if (stepIndex === 3) {
+      // Step 4: Send Reminder
+      setCurrentTab('reminders');
+    } else if (stepIndex === 4) {
+      // Step 5: View Dashboard
+      setCurrentTab('home');
+    }
+  };
+
+  const handleResetAllToDemo = () => {
+    resetLedgerToDemo();
+    resetStockToDemo();
+  };
+
+  // Find last action customer name for the undo toast
+  const lastActionCustomerName = React.useMemo(() => {
+    if (!lastAction) return 'Customer';
+    const c = customers.find((cust) => cust.id === lastAction.transaction.customer_id);
+    return c?.name || 'Customer';
+  }, [lastAction, customers]);
+
+  return (
+    <div className="min-h-screen bg-[#F2F8F5] text-[#123D31] flex flex-col font-sans selection:bg-[#25D366]/30">
+      {/* Top Header */}
+      <Header
+        profile={profile}
+        language={profile.language}
+        onLanguageChange={handleLanguageChange}
+        onOpenDemoGuide={() => setIsDemoGuideOpen(true)}
+      />
+
+      {/* Main Body Layout */}
+      <div className="flex-1 flex max-w-7xl w-full mx-auto">
+        {/* Desktop Sidebar & Mobile Bottom Navigation */}
+        <Navigation
+          currentTab={currentTab}
+          onTabChange={setCurrentTab}
+          language={profile.language}
+          onQuickMicPress={() => {
+            setCurrentTab('assistant');
+            setExternalVoiceTrigger(true);
+          }}
+        />
+
+        {/* Dynamic Screen View */}
+        <main className="flex-1 px-3 sm:px-6 py-4 lg:py-6 overflow-y-auto">
+          {currentTab === 'home' && (
+            <HomeDashboard
+              profile={profile}
+              language={profile.language}
+              totalUdhaar={totalUdhaar}
+              todayRecovery={todayRecovery}
+              lowStockProducts={lowStockProducts}
+              outOfStockProducts={outOfStockProducts}
+              overdueCustomers={overdueCustomers}
+              topDebtors={topDebtors}
+              cashFlow7Days={cashFlow7Days}
+              scans={scans}
+              onNavigate={setCurrentTab}
+              onOpenQuickVoice={() => {
+                setCurrentTab('assistant');
+                setExternalVoiceTrigger(true);
+              }}
+              onOpenAddCustomer={() => setCurrentTab('khata')}
+            />
+          )}
+
+          {currentTab === 'assistant' && (
+            <AssistantChat
+              profile={profile}
+              language={profile.language}
+              customers={customers}
+              customerBalances={customerBalances}
+              catalog={catalog}
+              onAddTransaction={addTransaction}
+              onAddCustomer={addCustomer}
+              onOpenShelfScan={() => setCurrentTab('stock')}
+              externalVoiceTrigger={externalVoiceTrigger}
+              onResetVoiceTrigger={() => setExternalVoiceTrigger(false)}
+            />
+          )}
+
+          {currentTab === 'khata' && (
+            <KhataScreen
+              profile={profile}
+              language={profile.language}
+              customers={customers}
+              transactions={transactions}
+              customerBalances={customerBalances}
+              onAddTransaction={addTransaction}
+              onAddCustomer={addCustomer}
+              onUpdateCustomer={updateCustomer}
+              onDeleteCustomer={deleteCustomer}
+              onOpenUpiQr={handleOpenUpiQr}
+            />
+          )}
+
+          {currentTab === 'stock' && (
+            <StockScreen
+              profile={profile}
+              language={profile.language}
+              catalog={catalog}
+              scans={scans}
+              reorderList={reorderList}
+              compareWithPreviousScan={compareWithPreviousScan}
+              onAddScan={addScan}
+              onUpdateProduct={updateProduct}
+              onAddProduct={addProduct}
+              onAddToReorder={addToReorder}
+              onUpdateReorderQty={updateReorderQty}
+              onRemoveFromReorder={removeFromReorder}
+              onClearReorder={clearReorder}
+              onPopulateReorderFromLowStock={populateReorderFromLowStock}
+              onExportReorderCsv={exportReorderCsv}
+            />
+          )}
+
+          {currentTab === 'reminders' && (
+            <RemindersScreen
+              profile={profile}
+              language={profile.language}
+              customers={customers}
+              customerBalances={customerBalances}
+              reminders={reminders}
+              onLogReminder={logReminder}
+              onOpenUpiQr={handleOpenUpiQr}
+            />
+          )}
+
+          {currentTab === 'insights' && (
+            <InsightsScreen
+              language={profile.language}
+              customers={customers}
+              transactions={transactions}
+              customerBalances={customerBalances}
+              catalog={catalog}
+              onAddToReorder={addToReorder}
+            />
+          )}
+
+          {currentTab === 'settings' && (
+            <SettingsScreen
+              profile={profile}
+              onUpdateProfile={setProfile}
+              onResetToDemo={handleResetAllToDemo}
+              onExportData={exportData}
+              onImportData={importData}
+            />
+          )}
+        </main>
+      </div>
+
+      {/* Floating 5-Second Undo Toast */}
+      <UndoToast
+        lastAction={lastAction}
+        customerName={lastActionCustomerName}
+        onUndo={undoLastTransaction}
+        onDismiss={clearUndo}
+      />
+
+      {/* Interactive 2-Minute Demo Guide Stepper */}
+      <DemoGuideModal
+        isOpen={isDemoGuideOpen}
+        onClose={() => setIsDemoGuideOpen(false)}
+        onNavigateToTab={setCurrentTab}
+        onRunDemoStep={handleRunDemoStep}
+      />
+
+      {/* DPDP Consent & First Launch Modal */}
+      <ConsentModal
+        isOpen={!profile.consent_accepted}
+        onComplete={(newProfile) => setProfile(newProfile)}
+        onLoadDemoData={handleResetAllToDemo}
+      />
+
+      {/* UPI QR Payment Modal */}
+      <UpiQrModal
+        isOpen={upiQrState.isOpen}
+        onClose={() => setUpiQrState((prev) => ({ ...prev, isOpen: false }))}
+        customerName={upiQrState.customerName}
+        customerPhone={upiQrState.customerPhone}
+        amount={upiQrState.amount}
+        shopName={profile.name}
+        upiId={profile.upi_id}
+      />
+    </div>
+  );
+}

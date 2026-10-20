@@ -1,0 +1,6 @@
+{
+  "name": "Dukaan Saathi - Voice Khata & Shelf Scanner",
+  "description": "WhatsApp-style kirana assistant: Voice Khata for udhaar ledger, AI Shelf Scanner for stock gaps, UPI reminders, and festival planning.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
