@@ -17,8 +17,17 @@ import { SettingsScreen } from './components/settings/SettingsScreen';
 import { useLedger } from './hooks/useLedger';
 import { useStock } from './hooks/useStock';
 import { Language } from './types';
+import { useShopSync } from './hooks/useShopSync';
+import type { PublicShop } from './services/account';
 
-export default function App() {
+interface AppProps {
+  /** 'shop' = logged in, data synced to the server; 'demo' = sample data in this browser only. */
+  mode: 'shop' | 'demo';
+  shop?: PublicShop;
+  onLogout: () => void;
+}
+
+export default function App({ mode, shop, onLogout }: AppProps) {
   const {
     profile,
     setProfile,
@@ -37,6 +46,7 @@ export default function App() {
     undoLastTransaction,
     clearUndo,
     addCustomer,
+    updateCustomer,
     recordConsent,
     withdrawConsent,
     deleteCustomer,
@@ -67,6 +77,13 @@ export default function App() {
     exportReorderCsv,
     resetStockToDemo,
   } = useStock(profile.id);
+
+  const sync = useShopSync(mode === 'shop', { profile, customers, transactions, reminders, catalog, scans, reorder: reorderList });
+
+  const handleLogout = async () => {
+    await sync.flush();
+    onLogout();
+  };
 
   const [currentTab, setCurrentTab] = useState<NavTab>('home');
   const [isDemoGuideOpen, setIsDemoGuideOpen] = useState(false);
@@ -125,6 +142,10 @@ export default function App() {
     <div className="min-h-screen bg-[#F2F8F5] text-[#123D31] flex flex-col font-sans selection:bg-[#25D366]/30">
       {/* Top Header */}
       <Header
+        mode={mode}
+        syncStatus={sync.status}
+        accountEmail={shop?.email}
+        onLogout={handleLogout}
         profile={profile}
         language={profile.language}
         onLanguageChange={handleLanguageChange}
@@ -161,6 +182,7 @@ export default function App() {
               topCustomersThisWeek={topCustomersThisWeek}
               customers={customers}
               transactions={transactions}
+              reminders={reminders}
               catalog={catalog}
               cashFlow7Days={cashFlow7Days}
               scans={scans}
@@ -199,6 +221,7 @@ export default function App() {
               customerBalances={customerBalances}
               onAddTransaction={addTransaction}
               onAddCustomer={addCustomer}
+              onUpdateCustomer={updateCustomer}
               onRecordConsent={recordConsent}
               onWithdrawConsent={withdrawConsent}
               onDeleteCustomer={deleteCustomer}
@@ -261,6 +284,9 @@ export default function App() {
               onClearAllData={clearAllData}
               onExportData={exportData}
               onImportData={importData}
+              mode={mode}
+              accountEmail={shop?.email}
+              onLogout={handleLogout}
             />
           )}
         </main>
@@ -285,6 +311,7 @@ export default function App() {
       {/* DPDP Consent & First Launch Modal */}
       <ConsentModal
         isOpen={!profile.consent_accepted}
+        allowDemoChoice={mode === 'demo'}
         profile={profile}
         onComplete={(newProfile) => setProfile(newProfile)}
         onStartEmpty={clearAllData}

@@ -29,6 +29,7 @@ import { formatPaise, parseRupeeInput, paiseToUpiAmount } from '../../lib/money'
 import { formatTime } from '../../utils/formatters';
 import { translations } from '../../utils/translations';
 import { parseKhataMessage, analyzeShelfImage } from '../../services/api';
+import { preparePhoto } from '../../lib/image';
 import { useAudioRecorder } from '../../hooks/useAudioRecorder';
 
 interface AssistantChatProps {
@@ -298,46 +299,48 @@ export const AssistantChat: React.FC<AssistantChatProps> = ({
     setEditingCardId(null);
   };
 
-  const handleShelfPhotoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleShelfPhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = '';
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = async () => {
-      const dataUrl = reader.result as string;
+    setIsProcessing(true);
+    try {
+      const photo = await preparePhoto(file);
       setMessages((prev) => [
         ...prev,
-        { id: `usr-img-${Date.now()}`, sender: 'user', timestamp: new Date().toISOString(), imagePreviewUrl: dataUrl, text: '📸 Shelf photo', status: 'sent' },
+        { id: `usr-img-${Date.now()}`, sender: 'user', timestamp: new Date().toISOString(), imagePreviewUrl: photo.thumbnail, text: '📸 Shelf photo', status: 'sent' },
       ]);
-      setIsProcessing(true);
-      try {
-        const analysis = await analyzeShelfImage({
-          imageBase64: dataUrl.split(',')[1],
-          imageMimeType: file.type,
-          catalog,
-          previousScanSummary: previousScanNotes,
-        });
-        if (analysis.products.length > 0) {
-          onAddScan({
-            image_ref: dataUrl,
-            overall_notes: analysis.overall_notes,
-            quality_warning: analysis.image_quality_warning ?? null,
-            detected_items: analysis.products,
-          });
-        }
-        const flagged = analysis.products.filter((p) => p.status === 'out' || p.status === 'low');
-        let reply = analysis.overall_notes;
-        if (analysis.image_quality_warning) reply = `⚠️ ${analysis.image_quality_warning}\n\n${reply}`;
-        if (flagged.length) {
-          reply += `\n\n*Khatam / kam stock:*\n${flagged.map((p) => `• ${p.name}: ${p.status === 'out' ? 'KHATAM' : 'KAM'}`).join('\n')}`;
-          reply += '\n\nReorder list Stock tab mein banayein.';
-        }
-        pushBot(reply);
-      } finally {
-        setIsProcessing(false);
+      const analysis = await analyzeShelfImage({
+        imageBase64: photo.upload.split(',')[1],
+        imageMimeType: 'image/jpeg',
+        catalog,
+        previousScanSummary: previousScanNotes,
+      });
+      if (analysis.error) {
+        pushBot(`⚠️ ${analysis.error}`);
+        return;
       }
-    };
-    reader.readAsDataURL(file);
+      if (analysis.products.length > 0) {
+        onAddScan({
+          image_ref: photo.thumbnail,
+          overall_notes: analysis.overall_notes,
+          quality_warning: analysis.image_quality_warning ?? null,
+          detected_items: analysis.products,
+        });
+      }
+      const flagged = analysis.products.filter((p) => p.status === 'out' || p.status === 'low');
+      let reply = analysis.overall_notes || 'Photo check ho gayi.';
+      if (analysis.image_quality_warning) reply = `⚠️ ${analysis.image_quality_warning}\n\n${reply}`;
+      if (flagged.length) {
+        reply += `\n\n*Khatam / kam stock:*\n${flagged.map((p) => `• ${p.name}: ${p.status === 'out' ? 'KHATAM' : 'KAM'}`).join('\n')}`;
+        reply += '\n\nReorder list Stock tab mein banayein.';
+      }
+      pushBot(reply);
+    } catch {
+      pushBot('⚠️ Photo process nahi hui. Dobara koshish karein.');
+    } finally {
+      setIsProcessing(false);
+    }
   };
 
   const sortedCustomerOptions = (p: AiParsedKhata) => {

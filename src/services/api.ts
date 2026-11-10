@@ -41,6 +41,8 @@ export interface ShelfAnalysis {
   overall_notes: string;
   products: DetectedProduct[];
   isDemo?: boolean;
+  /** Set when the photo could not be analysed. Nothing should be saved or shown as a result then. */
+  error?: string;
 }
 
 export async function analyzeShelfImage(params: {
@@ -49,8 +51,10 @@ export async function analyzeShelfImage(params: {
   catalog: Product[];
   previousScanSummary?: string;
 }): Promise<ShelfAnalysis> {
+  const failed = (error: string): ShelfAnalysis => ({ overall_notes: '', products: [], error });
+  let res: Response;
   try {
-    const res = await fetch('/api/gemini/analyze-shelf', {
+    res = await fetch('/api/gemini/analyze-shelf', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -60,17 +64,19 @@ export async function analyzeShelfImage(params: {
         catalog: params.catalog.map((p) => ({ id: p.id, name: p.name, aliases: p.aliases })),
       }),
     });
-    if (!res.ok) throw new Error(`Server returned ${res.status}`);
-    const data = (await res.json()) as ShelfAnalysis;
-    return { ...data, products: sanitizeDetections(data.products) };
   } catch {
-    return {
-      image_quality_warning: 'Server se connect nahi ho paya. Yeh sirf demo result hai.',
-      overall_notes: 'Demo result: photo analyse nahi hui.',
-      products: [],
-      isDemo: true,
-    };
+    return failed('Internet ya server se connect nahi ho paya. Dobara koshish karein.');
   }
+  const body = await res.json().catch(() => null);
+  if (res.status === 401) return failed('Shelf photo AI se check karne ke liye login karein (demo mein yeh band hai).');
+  if (!res.ok || !body) {
+    return failed(
+      (body && typeof body.message === 'string' && body.message) ||
+        (res.status === 404 ? 'Server (API) chalu nahi hai, isliye photo check nahi ho sakti.' : 'Photo analyse nahi ho payi.'),
+    );
+  }
+  const data = body as ShelfAnalysis;
+  return { ...data, products: sanitizeDetections(data.products) };
 }
 
 export async function getFestivalStockSuggestions(festival: string) {

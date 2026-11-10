@@ -1,8 +1,13 @@
 import React from 'react';
-import { Sparkles, Globe, PlayCircle, Store, Settings, MessageCircle } from 'lucide-react';
+import { Sparkles, Globe, PlayCircle, Store, Settings, MessageCircle, LogOut, Cloud, CloudOff, Loader2 } from 'lucide-react';
+import type { SyncStatus } from '../../hooks/useShopSync';
 import { Language, ShopProfile } from '../../types';
 
 interface HeaderProps {
+  mode: 'shop' | 'demo';
+  syncStatus: SyncStatus;
+  accountEmail?: string;
+  onLogout: () => void;
   profile: ShopProfile;
   language: Language;
   onLanguageChange: (lang: Language) => void;
@@ -14,6 +19,10 @@ interface HeaderProps {
 }
 
 export const Header: React.FC<HeaderProps> = ({
+  mode,
+  syncStatus,
+  accountEmail,
+  onLogout,
   profile,
   language,
   onLanguageChange,
@@ -35,9 +44,31 @@ export const Header: React.FC<HeaderProps> = ({
               <h1 className="text-base font-bold tracking-tight text-white truncate">
                 {profile.name || 'Dukaan Saathi'}
               </h1>
-              <span className="text-[10px] uppercase font-bold tracking-wider px-1.5 py-0.5 rounded bg-[#25D366]/20 text-[#25D366] border border-[#25D366]/30 flex-shrink-0">
-                Kirana
-              </span>
+              {mode === 'demo' ? (
+                <span className="text-[10px] uppercase font-bold tracking-wider px-1.5 py-0.5 rounded bg-[#F5A623]/20 text-[#F5A623] border border-[#F5A623]/40 flex-shrink-0">
+                  Demo
+                </span>
+              ) : (
+                <span
+                  title={accountEmail}
+                  className={`text-[10px] font-bold px-1.5 py-0.5 rounded flex items-center gap-1 flex-shrink-0 border ${
+                    syncStatus === 'error'
+                      ? 'bg-rose-500/20 text-rose-200 border-rose-400/40'
+                      : 'bg-[#25D366]/20 text-[#25D366] border-[#25D366]/30'
+                  }`}
+                >
+                  {syncStatus === 'saving' || syncStatus === 'pending' ? (
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                  ) : syncStatus === 'error' ? (
+                    <CloudOff className="w-3 h-3" />
+                  ) : (
+                    <Cloud className="w-3 h-3" />
+                  )}
+                  <span className="hidden sm:inline">
+                    {syncStatus === 'error' ? 'Save nahi hua' : syncStatus === 'saved' ? 'Saved' : 'Saving'}
+                  </span>
+                </span>
+              )}
             </div>
             <p className="text-xs text-emerald-200/80 truncate">
               {profile.owner ? `${profile.owner} • ` : ''}Bolo. Photo kheencho. Paisa pao.
@@ -57,6 +88,9 @@ export const Header: React.FC<HeaderProps> = ({
               <Settings className="w-5 h-5" />
             </button>
           )}
+          <button onClick={onLogout} className="p-1.5 rounded-lg hover:bg-white/10" title={mode === 'demo' ? 'Demo band karein' : 'Logout'} aria-label="Logout">
+            <LogOut className="w-5 h-5" />
+          </button>
           {/* Demo Guide Stepper Button */}
           <button
             onClick={onOpenDemoGuide}

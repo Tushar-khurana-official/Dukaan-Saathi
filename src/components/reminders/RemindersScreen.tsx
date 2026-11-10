@@ -15,7 +15,7 @@ import {
 import { Customer, Language, ReminderLog, ReminderTone, ShopProfile } from '../../types';
 import { formatRelativeDate } from '../../utils/formatters';
 import { formatPaise } from '../../lib/money';
-import { buildReminderMessage, createWhatsAppUrl, isValidUpiId } from '../../lib/reminders';
+import { buildReminderMessage, createWhatsAppShareUrl, createWhatsAppUrl, isValidUpiId } from '../../lib/reminders';
 import { translations } from '../../utils/translations';
 
 interface RemindersScreenProps {
@@ -82,15 +82,16 @@ export const RemindersScreen: React.FC<RemindersScreenProps> = ({
     buildReminderMessage({ amountPaise, shopName: profile.name, upiId: profile.upi_id, language: msgLanguage, tone });
   const reminderMessage = activeCustomer ? messageFor(activeCustomer.balance) : '';
 
-  const canSend = (cust?: (typeof pendingCustomers)[number]) =>
-    Boolean(cust && cust.phone && cust.consent_given_at && upiOk);
+  /** Number saved with consent: WhatsApp opens straight in the customer's chat. */
+  const hasNumber = (cust?: (typeof pendingCustomers)[number]) => Boolean(cust && cust.phone && cust.consent_given_at);
+  /** Without a saved number WhatsApp still opens with the message; the owner picks the contact there. */
+  const canSend = (cust?: (typeof pendingCustomers)[number]) => Boolean(cust && upiOk);
 
   /** Opens WhatsApp with the message prefilled. The owner presses send inside WhatsApp. */
   const handleOpenWhatsApp = (cust = activeCustomer) => {
     if (!cust || !canSend(cust)) return;
     const text = messageFor(cust.balance);
-    const url = createWhatsAppUrl(cust.phone, text);
-    if (!url) return;
+    const url = (hasNumber(cust) && createWhatsAppUrl(cust.phone, text)) || createWhatsAppShareUrl(text);
     onLogReminderOpened({ customer_id: cust.id, text, amount_paise: cust.balance, tone });
     window.open(url, '_blank', 'noopener');
   };
@@ -200,7 +201,7 @@ export const RemindersScreen: React.FC<RemindersScreenProps> = ({
                   <div className="min-w-0 pr-2">
                     <h4 className="text-xs font-extrabold text-[#123D31] truncate">{cust.name}</h4>
                     <p className="text-[10px] text-[#5F7A6E]">
-                      {cust.daysOverdue} din pehle • {cust.phone && cust.consent_given_at ? 'WhatsApp ready' : 'Number/sehmati nahi'}
+                      {cust.daysOverdue} din pehle • {hasNumber(cust) ? 'Seedha chat khulegi' : 'WhatsApp mein contact chunein'}
                     </p>
                   </div>
 
@@ -313,10 +314,10 @@ export const RemindersScreen: React.FC<RemindersScreenProps> = ({
                     Settings mein sahi UPI ID daaliye (jaise naam@okaxis), tabhi reminder bhej sakte hain.
                   </p>
                 )}
-                {upiOk && !canSend(activeCustomer) && (
-                  <p className="text-[11px] font-bold text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-2">
-                    Is grahak ka number grahak ki sehmati se save nahi hai. Khata tab mein "+ Number jodein" se jodein, ya
-                    dukaan par UPI QR dikhayein.
+                {upiOk && !hasNumber(activeCustomer) && (
+                  <p className="text-[11px] text-[#5F7A6E] bg-gray-50 border border-gray-200 rounded-lg p-2">
+                    Is grahak ka number save nahi hai: WhatsApp khulega aur aap contact khud chunenge. Seedha chat ke liye
+                    Khata mein grahak ki sehmati se "+ Number jodein".
                   </p>
                 )}
                 <button
@@ -325,7 +326,7 @@ export const RemindersScreen: React.FC<RemindersScreenProps> = ({
                   className="w-full py-3.5 px-4 rounded-xl bg-[#25D366] hover:bg-[#20ba59] text-[#0B3D2E] font-black text-sm flex items-center justify-center gap-2 shadow-md active:scale-98 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   <Send className="w-4 h-4 fill-[#0B3D2E]" />
-                  <span>{t.btnSendWhatsApp}</span>
+                  <span>{hasNumber(activeCustomer) ? t.btnSendWhatsApp : `${t.btnSendWhatsApp} (contact chunein)`}</span>
                   <ExternalLink className="w-3.5 h-3.5 opacity-70" />
                 </button>
 

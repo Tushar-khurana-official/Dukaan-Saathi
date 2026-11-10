@@ -10,7 +10,7 @@
  *
  * Returns rupees (may be fractional); callers convert to paise.
  */
-import { normalizeText, phoneticKey } from './textNormalize';
+import { normalizeText, phoneticKey } from './textNormalize.js';
 
 type NumberToken =
   | { kind: 'unit'; value: number; ambiguous: boolean }

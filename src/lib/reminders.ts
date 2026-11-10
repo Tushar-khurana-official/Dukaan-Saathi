@@ -4,7 +4,7 @@
  * No customer name, phone number, item list or overdue history goes into the message.
  * Templates are deterministic (no AI call) so this rule can be tested and costs nothing per send.
  */
-import { formatPaise, paiseToUpiAmount } from './money';
+import { formatPaise, paiseToUpiAmount } from './money.js';
 
 export type ReminderLanguage = 'hindi' | 'english' | 'hinglish';
 export type ReminderToneKind = 'polite' | 'friendly' | 'firm';
