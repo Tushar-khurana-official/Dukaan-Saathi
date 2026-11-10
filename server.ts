@@ -1,8 +1,25 @@
-import express, { Request, Response } from 'express';
+/**
+ * Dukaan Saathi prototype server.
+ *
+ * - Keeps the Gemini API key on the server (the browser never sees it).
+ * - Typed text is parsed by the deterministic parser first; Gemini is only called for voice notes
+ *   or when the rule-based parse is unsure. This keeps the running cost per shop low.
+ * - Gemini output is cross-checked: amounts and customer ids are re-derived by our own code.
+ * - Privacy (DPDP section of the spec): only customer ids and names are sent to the model, never
+ *   phone numbers; logs never contain names, phone numbers, transcripts or amounts.
+ * - Token usage per voice entry / shelf photo is recorded and exposed at GET /api/usage.
+ */
+import express, { NextFunction, Request, Response } from 'express';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI, Type } from '@google/genai';
+import { parseKhataText, KhataIntent, ParsedKhata } from './src/lib/khataParser';
+import { matchCustomer } from './src/lib/customerMatch';
+import { extractAmount } from './src/lib/hindiNumbers';
+import { rupeesToPaise } from './src/lib/money';
+import { confirmationText, ReplyLanguage } from './src/lib/replies';
+import { sanitizeDetections, stripUnitCounts } from './src/lib/shelf';
 
 dotenv.config();
 
@@ -10,174 +27,279 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = Number(process.env.PORT) || 3000;
+const MODEL = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
+const INPUT_USD_PER_M = Number(process.env.GEMINI_INPUT_USD_PER_MTOK || 0);
+const OUTPUT_USD_PER_M = Number(process.env.GEMINI_OUTPUT_USD_PER_MTOK || 0);
 
-app.use(express.json({ limit: '25mb' }));
+app.use(express.json({ limit: '15mb' }));
 
-// Initialize GoogleGenAI server-side with User-Agent header
 const apiKey = process.env.GEMINI_API_KEY || '';
-let ai: GoogleGenAI | null = null;
+const ai = apiKey && apiKey !== 'MY_GEMINI_API_KEY' ? new GoogleGenAI({ apiKey }) : null;
 
-if (apiKey && apiKey !== 'MY_GEMINI_API_KEY') {
-  ai = new GoogleGenAI({
-    apiKey,
-    httpOptions: {
-      headers: {
-        'User-Agent': 'aistudio-build',
-      },
-    },
-  });
+/* ------------------------------------------------------------------ */
+/* Logging without personal data                                       */
+/* ------------------------------------------------------------------ */
+
+function log(event: string, fields: Record<string, string | number | boolean | null> = {}) {
+  // Only event names, sizes, durations and token counts. Never request bodies.
+  console.log(JSON.stringify({ t: new Date().toISOString(), event, ...fields }));
 }
 
-// Health check endpoint
-app.get('/api/health', (req: Request, res: Response) => {
+function errorKind(err: unknown): string {
+  if (err && typeof err === 'object' && 'status' in err) return `status_${(err as { status: unknown }).status}`;
+  return err instanceof Error ? err.name : 'unknown';
+}
+
+/* ------------------------------------------------------------------ */
+/* Cost tracking                                                       */
+/* ------------------------------------------------------------------ */
+
+type UsageKind = 'voice_entry' | 'text_entry' | 'shelf_photo' | 'festival_plan';
+const usage: Record<UsageKind, { calls: number; inputTokens: number; outputTokens: number; ruleOnly: number }> = {
+  voice_entry: { calls: 0, inputTokens: 0, outputTokens: 0, ruleOnly: 0 },
+  text_entry: { calls: 0, inputTokens: 0, outputTokens: 0, ruleOnly: 0 },
+  shelf_photo: { calls: 0, inputTokens: 0, outputTokens: 0, ruleOnly: 0 },
+  festival_plan: { calls: 0, inputTokens: 0, outputTokens: 0, ruleOnly: 0 },
+};
+
+function recordUsage(kind: UsageKind, meta: { promptTokenCount?: number; candidatesTokenCount?: number; thoughtsTokenCount?: number } | undefined, ms: number) {
+  const u = usage[kind];
+  const input = meta?.promptTokenCount ?? 0;
+  const output = (meta?.candidatesTokenCount ?? 0) + (meta?.thoughtsTokenCount ?? 0);
+  u.calls++;
+  u.inputTokens += input;
+  u.outputTokens += output;
+  log('gemini_call', { kind, model: MODEL, input_tokens: input, output_tokens: output, ms });
+}
+
+app.get('/api/usage', (_req: Request, res: Response) => {
+  const out = Object.fromEntries(
+    Object.entries(usage).map(([kind, u]) => {
+      const avgIn = u.calls ? u.inputTokens / u.calls : 0;
+      const avgOut = u.calls ? u.outputTokens / u.calls : 0;
+      const priced = INPUT_USD_PER_M > 0 || OUTPUT_USD_PER_M > 0;
+      return [
+        kind,
+        {
+          gemini_calls: u.calls,
+          handled_without_ai: u.ruleOnly,
+          avg_input_tokens: Math.round(avgIn),
+          avg_output_tokens: Math.round(avgOut),
+          est_usd_per_call: priced ? +((avgIn * INPUT_USD_PER_M + avgOut * OUTPUT_USD_PER_M) / 1e6).toFixed(6) : null,
+        },
+      ];
+    }),
+  );
   res.json({
-    status: 'ok',
-    hasKey: Boolean(apiKey && apiKey !== 'MY_GEMINI_API_KEY'),
-    timestamp: new Date().toISOString(),
+    model: MODEL,
+    pricing_configured: INPUT_USD_PER_M > 0 || OUTPUT_USD_PER_M > 0,
+    note: 'Counts since server start. Set GEMINI_INPUT_USD_PER_MTOK / GEMINI_OUTPUT_USD_PER_MTOK to get cost estimates.',
+    usage: out,
   });
 });
 
+app.get('/api/health', (_req: Request, res: Response) => {
+  res.json({ status: 'ok', ai: Boolean(ai), model: ai ? MODEL : null, timestamp: new Date().toISOString() });
+});
+
+/* ------------------------------------------------------------------ */
+/* Helpers                                                             */
+/* ------------------------------------------------------------------ */
+
+interface CustomerRef {
+  id: string;
+  name: string;
+}
+
+/** Accept only id + name from the client and cap the list size. Phones are dropped here. */
+function customerRefs(input: unknown): CustomerRef[] {
+  if (!Array.isArray(input)) return [];
+  return input
+    .filter((c): c is Record<string, unknown> => typeof c === 'object' && c !== null)
+    .map((c) => ({ id: String(c.id ?? ''), name: String(c.name ?? '').slice(0, 80) }))
+    .filter((c) => c.id && c.name)
+    .slice(0, 2000);
+}
+
+function lang(input: unknown): ReplyLanguage {
+  return input === 'hindi' || input === 'english' ? input : 'hinglish';
+}
+
+const INTENTS: KhataIntent[] = ['add_credit', 'add_payment', 'add_sale', 'query_balance', 'list_overdue', 'add_customer', 'summary', 'unknown'];
+
 /**
- * 1. Parse Voice or Text Khata message
- * Handles Hindi number words ("paanch sau", "dedh sau", "dhai sau"), intent detection,
- * customer fuzzy matching, amount and item notes extraction.
+ * Merge a Gemini parse with the deterministic parse of the same transcript.
+ * Our code decides the amount (Hindi number words) and the customer id (fuzzy match against the real list).
  */
+function reconcile(transcript: string, gemini: Record<string, unknown>, customers: CustomerRef[]): ParsedKhata {
+  const rule = parseKhataText(transcript, customers);
+  const geminiIntent = INTENTS.includes(gemini.intent as KhataIntent) ? (gemini.intent as KhataIntent) : 'unknown';
+  const intent = rule.intent !== 'unknown' && rule.confidence >= 0.85 ? rule.intent : geminiIntent !== 'unknown' ? geminiIntent : rule.intent;
+
+  const ruleAmount = extractAmount(transcript);
+  const geminiAmount = typeof gemini.amount === 'number' && gemini.amount > 0 ? rupeesToPaise(gemini.amount) : null;
+  const amount_paise = ruleAmount ? rupeesToPaise(ruleAmount.value) : geminiAmount;
+
+  let matched_customer_id = rule.matched_customer_id;
+  let candidates = rule.candidate_customer_ids;
+  if (!matched_customer_id && typeof gemini.customer_name === 'string' && gemini.customer_name) {
+    const m = matchCustomer(gemini.customer_name, customers);
+    if (m.best) matched_customer_id = m.best.customer.id;
+    if (m.candidates.length) candidates = m.candidates.map((c) => c.customer.id);
+  }
+  const needsCustomer = intent === 'add_credit' || intent === 'add_payment' || intent === 'query_balance';
+  const matched = customers.find((c) => c.id === matched_customer_id) ?? null;
+  const spoken = matched?.name ?? (typeof gemini.customer_name === 'string' && gemini.customer_name ? gemini.customer_name : rule.customer_name);
+
+  let question: string | null = null;
+  if (intent === 'unknown') question = rule.clarification_question;
+  else if ((intent === 'add_credit' || intent === 'add_payment' || intent === 'add_sale') && amount_paise === null) question = 'Kitne rupaye? Rashi dobara boliye.';
+  else if (needsCustomer && !matched) {
+    const first = customers.find((c) => c.id === candidates[0]);
+    question = first ? `Kya aapka matlab ${first.name} hai?` : `"${spoken}" naam ka grahak nahi mila. Naya grahak banayein ya list se chunein.`;
+  }
+
+  const geminiConfidence = typeof gemini.confidence === 'number' ? gemini.confidence : 0.7;
+  return {
+    transcript,
+    intent,
+    customer_name: spoken,
+    matched_customer_id: needsCustomer ? matched?.id ?? null : null,
+    candidate_customer_ids: candidates,
+    amount_paise,
+    items_note: rule.items_note ?? (typeof gemini.items_note === 'string' ? gemini.items_note : null),
+    confidence: Math.round(Math.min(geminiConfidence, needsCustomer && !matched ? 0.5 : 1) * 100) / 100,
+    needs_clarification: question !== null,
+    clarification_question: question,
+  };
+}
+
+function withReply(p: ParsedKhata, customers: CustomerRef[], language: ReplyLanguage, isDemo: boolean) {
+  const name = customers.find((c) => c.id === p.matched_customer_id)?.name ?? null;
+  return { ...p, bot_reply_text: confirmationText(p, name, language), isDemo };
+}
+
+/* ------------------------------------------------------------------ */
+/* 1. Voice / text khata entry                                         */
+/* ------------------------------------------------------------------ */
+
 app.post('/api/gemini/parse-khata', async (req: Request, res: Response) => {
+  const started = Date.now();
+  const { text, audioBase64, audioMimeType } = req.body ?? {};
+  const customers = customerRefs(req.body?.customers);
+  const language = lang(req.body?.language);
+  const typed = typeof text === 'string' ? text.slice(0, 500) : '';
+
+  if (!typed && !audioBase64) return res.status(400).json({ error: 'text or audioBase64 required' });
+
+  // Typed text (or the browser's live transcript when there is no AI key): rule-based first.
+  const rule = typed ? parseKhataText(typed, customers) : null;
+  const ruleIsConfident = rule && rule.intent !== 'unknown' && rule.confidence >= 0.85 && !rule.needs_clarification;
+  if (!ai || (rule && !audioBase64 && ruleIsConfident)) {
+    if (rule) {
+      usage[audioBase64 ? 'voice_entry' : 'text_entry'].ruleOnly++;
+      log('parse_rule_only', { has_audio: Boolean(audioBase64), ms: Date.now() - started });
+      return res.json(withReply(rule, customers, language, !ai));
+    }
+    return res.json(withReply(parseKhataText('', customers), customers, language, true));
+  }
+
+  const kind: UsageKind = audioBase64 ? 'voice_entry' : 'text_entry';
   try {
-    const { text, audioBase64, audioMimeType, customers, language = 'hinglish' } = req.body;
+    const customerList = customers.map((c) => `${c.id}: ${c.name}`).join('\n') || 'None';
+    const systemInstruction = `You parse Indian kirana shopkeeper voice notes and messages about udhaar (credit), payments and sales.
+Speech may be Hindi, English or Hinglish, noisy, with fillers.
+Examples:
+- "Sharma ji ko 500 udhaar, saman ka" -> add_credit, customer "Sharma ji", amount 500, note "saman"
+- "Gupta ji ne 300 diye" -> add_payment, customer "Gupta ji", amount 300
+- "aaj 2000 ki bikri hui" -> add_sale, amount 2000
+- "Verma ji ka kitna baaki hai?" -> query_balance
+- "Kis kis ka udhaar baaki hai?" -> list_overdue
+Hindi numbers: sau=100, hazaar=1000, dedh sau=150, dhai sau=250, saade teen sau=350, paune do sau=175.
+Pick the customer from this list (id: name) when the spoken name clearly refers to one; otherwise leave matched_customer_id empty:
+${customerList}
+Write the transcript exactly as spoken (Latin or Devanagari script). Do not invent amounts.`;
 
-    if (!text && !audioBase64) {
-      return res.status(400).json({ error: 'Text or audioBase64 required' });
-    }
-
-    // Fallback parser if no AI key configured or demo mode requested
-    if (!ai) {
-      return res.json(simulateKhataParsing(text, customers, language));
-    }
-
-    const customersContext = Array.isArray(customers)
-      ? customers.map((c: any) => `ID: ${c.id}, Name: "${c.name}", Phone: "${c.phone}"`).join('\n')
-      : 'None provided';
-
-    const systemInstruction = `You are Dukaan Saathi, an intelligent Kirana shop ledger assistant in India.
-Your job is to parse shopkeeper voice notes or text entries regarding customer udhaar (credit) and payments.
-Indian colloquial context:
-- "Sharma ji ko 500 udhaar, saman ka" -> intent: add_credit, customer: "Sharma ji", amount: 500, note: "saman ka"
-- "Gupta ji ne 300 diye" -> intent: add_payment, customer: "Gupta ji", amount: 300, note: "payment"
-- "Verma ji ka kitna baaki hai?" -> intent: query_balance, customer: "Verma ji"
-- "Kis kis ka udhaar baaki hai?" -> intent: list_overdue
-- "Naya customer Ramesh phone 9876543210" -> intent: add_customer
-- Number words in Hindi: "sau" = 100, "paanch sau" = 500, "hazaar" = 1000, "dedh sau" = 150, "dhai sau" = 250, "dedh hazaar" = 1500, "dhai hazaar" = 2500, "ek sau pachaas" = 150.
-Fuzzy match against the existing customer list. If match is strong, set matched_customer_id.
-If customer name matches multiple people or is completely missing/ambiguous, set needs_clarification=true and ask a helpful question in clarification_question.
-Always provide bot_reply_text in the requested language (${language}: 'hindi' (Devanagari), 'english', or 'hinglish' (conversational Latin script)).`;
-
-    const contents: any[] = [];
-    if (audioBase64) {
-      contents.push({
-        inlineData: {
-          mimeType: audioMimeType || 'audio/webm',
-          data: audioBase64,
-        },
-      });
-      contents.push({
-        text: `Transcribe this Indian kirana shopkeeper audio accurately, then extract ledger information. Existing customers:\n${customersContext}`,
-      });
-    } else {
-      contents.push({
-        text: `Parse this shopkeeper message: "${text}". Existing customers:\n${customersContext}`,
-      });
-    }
+    const parts: Array<Record<string, unknown>> = audioBase64
+      ? [
+          { inlineData: { mimeType: typeof audioMimeType === 'string' ? audioMimeType : 'audio/webm', data: String(audioBase64) } },
+          { text: 'Transcribe this voice note, then extract the ledger entry.' },
+        ]
+      : [{ text: `Message: ${typed}` }];
 
     const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
-      contents: { parts: contents },
+      model: MODEL,
+      contents: { parts },
       config: {
         systemInstruction,
         responseMimeType: 'application/json',
         responseSchema: {
           type: Type.OBJECT,
           properties: {
-            transcript: { type: Type.STRING, description: 'Transcribed text or verbatim input' },
-            intent: {
-              type: Type.STRING,
-              enum: ['add_credit', 'add_payment', 'query_balance', 'list_overdue', 'add_customer', 'summary', 'unknown'],
-            },
+            transcript: { type: Type.STRING },
+            intent: { type: Type.STRING, enum: INTENTS },
             customer_name: { type: Type.STRING },
             matched_customer_id: { type: Type.STRING, nullable: true },
             amount: { type: Type.NUMBER, nullable: true },
             items_note: { type: Type.STRING, nullable: true },
-            confidence: { type: Type.NUMBER, description: 'Between 0.0 and 1.0' },
-            needs_clarification: { type: Type.BOOLEAN },
-            clarification_question: { type: Type.STRING, nullable: true },
-            bot_reply_text: { type: Type.STRING },
+            confidence: { type: Type.NUMBER },
           },
-          required: ['transcript', 'intent', 'confidence', 'needs_clarification', 'bot_reply_text'],
+          required: ['transcript', 'intent', 'confidence'],
         },
       },
     });
+    recordUsage(kind, response.usageMetadata, Date.now() - started);
 
-    const parsed = JSON.parse(response.text || '{}');
-    return res.json({
-      ...parsed,
-      isDemo: false,
-    });
-  } catch (err: any) {
-    console.error('Gemini parse-khata error:', err);
-    // Graceful fallback to demo logic so app never breaks
-    const { text, customers, language = 'hinglish' } = req.body;
-    return res.json(simulateKhataParsing(text || 'Audio message', customers, language));
+    const gemini = JSON.parse(response.text || '{}') as Record<string, unknown>;
+    const transcript = typeof gemini.transcript === 'string' && gemini.transcript ? gemini.transcript : typed;
+    return res.json(withReply(reconcile(transcript, gemini, customers), customers, language, false));
+  } catch (err) {
+    log('gemini_error', { kind, error: errorKind(err), ms: Date.now() - started });
+    const fallback = parseKhataText(typed, customers);
+    return res.json(withReply(fallback, customers, language, true));
   }
 });
 
-/**
- * 2. Analyze Shelf photo
- * Detects shelf gaps and low stock (NOT exact unit counts).
- */
+/* ------------------------------------------------------------------ */
+/* 2. Shelf photo: gaps and low stock, never unit counts                */
+/* ------------------------------------------------------------------ */
+
 app.post('/api/gemini/analyze-shelf', async (req: Request, res: Response) => {
+  const started = Date.now();
+  const { imageBase64, imageMimeType = 'image/jpeg', previousScanSummary } = req.body ?? {};
+  if (!imageBase64) return res.status(400).json({ error: 'imageBase64 is required' });
+
+  const catalog = Array.isArray(req.body?.catalog)
+    ? (req.body.catalog as Array<Record<string, unknown>>).slice(0, 300).map((p) => ({
+        id: String(p.id ?? ''),
+        name: String(p.name ?? ''),
+        aliases: Array.isArray(p.aliases) ? p.aliases.map(String).slice(0, 5) : [],
+      }))
+    : [];
+
+  if (!ai) {
+    usage.shelf_photo.ruleOnly++;
+    return res.json(demoShelfAnalysis());
+  }
+
   try {
-    const { imageBase64, imageMimeType = 'image/jpeg', catalog, previousScanSummary } = req.body;
-
-    if (!imageBase64) {
-      return res.status(400).json({ error: 'imageBase64 is required' });
-    }
-
-    if (!ai) {
-      return res.json(simulateShelfAnalysis(catalog));
-    }
-
-    const catalogList = Array.isArray(catalog)
-      ? catalog.map((p: any) => `${p.name} (Cat: ${p.category || 'General'}, Min: ${p.min_level || 5})`).join(', ')
-      : 'Popular Indian Kirana items (Maggi, Parle-G, Tata Salt, Fortune Oil, Red Label Tea, Surf Excel, Colgate, Amul Butter, etc.)';
-
-    const systemInstruction = `You are Dukaan Saathi's visual AI for Indian kirana grocery shelves.
-CRITICAL HONESTY RULE:
-You detect SHELF GAPS, EMPTY SPACES, and LOW STOCK relative to shelf occupancy, NOT exact unit counts.
-Never claim exact counts.
-Inspect the grocery shelf photo carefully.
-Catalog SKUs to check against: ${catalogList}.
-Previous scan context: ${previousScanSummary || 'None available'}.
-For detected items/gaps:
-- status: 'out' (empty gap/tag visible but no product), 'low' (only 1-2 items left or front edge sparse), 'ok' (full facing), or 'unknown' (blurry/unclear).
-- confidence: between 0.5 and 1.0.
-- note: short description (e.g. "Only 1 packet visible, large empty gap on right").
-- box_2d: optional normalized bounding box [ymin, xmin, ymax, xmax] between 0 and 1000.
-Flag image_quality_warning if photo is too dark, blurry, or badly angled.`;
+    const catalogList = catalog.map((p) => `${p.id}: ${p.name}${p.aliases.length ? ` (${p.aliases.join(', ')})` : ''}`).join('\n');
+    const systemInstruction = `You inspect photos of Indian kirana shop shelves.
+RULE: report shelf gaps and low stock from how full each facing looks. NEVER state a number of units, packets or pieces.
+Use status: "out" = empty gap where the product belongs, "low" = sparse facing, "ok" = full facing, "unknown" = cannot tell.
+Notes must describe space ("right half of the row is empty"), not counts.
+Match products to this catalog (id: name) when you can, else matched_sku = null:
+${catalogList || 'No catalog provided'}
+Previous scan summary: ${typeof previousScanSummary === 'string' ? stripUnitCounts(previousScanSummary.slice(0, 500)) : 'none'}.
+Set image_quality_warning if the photo is dark, blurry or badly angled.`;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
+      model: MODEL,
       contents: {
         parts: [
-          {
-            inlineData: {
-              mimeType: imageMimeType,
-              data: imageBase64,
-            },
-          },
-          {
-            text: 'Analyze this kirana shelf for stock gaps, low inventory, and shelf occupancy. Compare with catalog.',
-          },
+          { inlineData: { mimeType: String(imageMimeType), data: String(imageBase64) } },
+          { text: 'Find gaps and low stock on this shelf.' },
         ],
       },
       config: {
@@ -198,11 +320,7 @@ Flag image_quality_warning if photo is too dark, blurry, or badly angled.`;
                   status: { type: Type.STRING, enum: ['ok', 'low', 'out', 'unknown'] },
                   confidence: { type: Type.NUMBER },
                   note: { type: Type.STRING },
-                  box_2d: {
-                    type: Type.ARRAY,
-                    items: { type: Type.NUMBER },
-                    description: '[ymin, xmin, ymax, xmax] 0-1000',
-                  },
+                  box_2d: { type: Type.ARRAY, items: { type: Type.NUMBER } },
                 },
                 required: ['name', 'status', 'confidence', 'note'],
               },
@@ -212,147 +330,40 @@ Flag image_quality_warning if photo is too dark, blurry, or badly angled.`;
         },
       },
     });
+    recordUsage('shelf_photo', response.usageMetadata, Date.now() - started);
 
-    const result = JSON.parse(response.text || '{}');
+    const result = JSON.parse(response.text || '{}') as Record<string, unknown>;
+    const validSkus = new Set(catalog.map((p) => p.id));
+    const products = sanitizeDetections(result.products).map((p) => ({
+      ...p,
+      matched_sku: p.matched_sku && validSkus.has(p.matched_sku) ? p.matched_sku : null,
+    }));
     return res.json({
-      ...result,
-      isDemo: false,
-    });
-  } catch (err: any) {
-    console.error('Gemini analyze-shelf error:', err);
-    return res.json(simulateShelfAnalysis(req.body.catalog));
-  }
-});
-
-/**
- * 3. Generate Payment Reminder Message
- */
-app.post('/api/gemini/generate-reminder', async (req: Request, res: Response) => {
-  try {
-    const { customerName, amount, daysOverdue, tone = 'polite', language = 'hinglish', shopName, upiId } = req.body;
-
-    if (!ai) {
-      return res.json({
-        message: generateDefaultReminder(customerName, amount, tone, language, shopName, upiId),
-        isDemo: true,
-      });
-    }
-
-    const prompt = `Write a short WhatsApp payment reminder message for an Indian kirana shop.
-Customer: "${customerName}"
-Amount Due: ₹${amount}
-Days Overdue: ${daysOverdue} days
-Tone: "${tone}" (polite = warm and gentle, friendly = casual neighbourly, firm = direct reminder about pending ledger closure)
-Language: "${language}" ('hinglish', 'hindi' in Devanagari, or 'english')
-Shop Name: "${shopName || 'Hamari Dukaan'}"
-UPI ID: "${upiId || 'shop@upi'}"
-Include a clear call to action and mention the UPI payment option. Keep it concise, respectful, and suitable for WhatsApp.`;
-
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
-      contents: prompt,
-      config: {
-        temperature: 0.7,
-      },
-    });
-
-    return res.json({
-      message: response.text?.trim() || generateDefaultReminder(customerName, amount, tone, language, shopName, upiId),
+      image_quality_warning: typeof result.image_quality_warning === 'string' ? stripUnitCounts(result.image_quality_warning) : null,
+      overall_notes: stripUnitCounts(String(result.overall_notes ?? '')),
+      products,
       isDemo: false,
     });
   } catch (err) {
-    console.error('Gemini reminder error:', err);
-    const { customerName, amount, tone, language, shopName, upiId } = req.body;
-    return res.json({
-      message: generateDefaultReminder(customerName, amount, tone, language, shopName, upiId),
-      isDemo: true,
-    });
+    log('gemini_error', { kind: 'shelf_photo', error: errorKind(err), ms: Date.now() - started });
+    return res.json(demoShelfAnalysis());
   }
 });
 
-/**
- * 4. Generate Daily Summary
- */
-app.post('/api/gemini/daily-summary', async (req: Request, res: Response) => {
-  try {
-    const { totalUdhaar, todayRecovery, lowStockCount, topDebtors, language = 'hinglish' } = req.body;
+/* ------------------------------------------------------------------ */
+/* 3. Festival stock planner (no customer data involved)               */
+/* ------------------------------------------------------------------ */
 
-    if (!ai) {
-      return res.json({
-        lines: [
-          `Kul udhaar baaki: ₹${totalUdhaar?.toLocaleString('en-IN') || 0}, aaj ₹${todayRecovery?.toLocaleString('en-IN') || 0} ki vasooli hui.`,
-          `${lowStockCount || 3} zaroori items shelf par khatam ya low stock hain.`,
-          `Top overdue grahak: ${topDebtors || 'Sharma ji, Verma ji'}.`,
-        ],
-        tip: 'Aaj shaam 6 se 8 baje ke beech reminder bhejne se 40% zyada log UPI se turant payment karte hain.',
-        isDemo: true,
-      });
-    }
-
-    const prompt = `Generate an AI kirana shop daily briefing.
-Data:
-- Total pending credit (Udhaar): ₹${totalUdhaar}
-- Today's recovery: ₹${todayRecovery}
-- Low stock items: ${lowStockCount}
-- Top debtors: ${topDebtors}
-Language: ${language}
-Return JSON with exactly two fields:
-1. "lines": array of exactly 3 short punchy bullet points
-2. "tip": one actionable practical tip for today (e.g. reminder timing, stocking tip, festival advice)`;
-
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
-      contents: prompt,
-      config: {
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            lines: {
-              type: Type.ARRAY,
-              items: { type: Type.STRING },
-            },
-            tip: { type: Type.STRING },
-          },
-          required: ['lines', 'tip'],
-        },
-      },
-    });
-
-    const parsed = JSON.parse(response.text || '{}');
-    return res.json({ ...parsed, isDemo: false });
-  } catch (err) {
-    console.error('Gemini daily-summary error:', err);
-    return res.json({
-      lines: [
-        'Aaj kul udhaar baaki par nazar rakhein.',
-        'Low stock items ki list distributor ko bhejein.',
-        'Overdue grahakon ko shaam ko polite reminder bhejein.',
-      ],
-      tip: 'Chhote udhaar (₹200 se kam) par UPI QR dikhayein taaki cash chutta ka jhanjhat na ho.',
-      isDemo: true,
-    });
-  }
-});
-
-/**
- * 5. Suggest Festival Stock
- */
 app.post('/api/gemini/festival-stock', async (req: Request, res: Response) => {
+  const started = Date.now();
+  const festival = typeof req.body?.festival === 'string' ? req.body.festival.slice(0, 40) : 'Diwali';
+  if (!ai) return res.json(demoFestivalStock(festival));
+
   try {
-    const { festival = 'Diwali', catalog } = req.body;
-
-    if (!ai) {
-      return res.json(simulateFestivalStock(festival));
-    }
-
-    const prompt = `You are Dukaan Saathi's inventory planner.
-Suggest 8 essential kirana grocery items to stock up on for the upcoming Indian festival: "${festival}".
-Explain why each item is critical and give an estimated demand surge percentage (e.g., "+70%").`;
-
     const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
-      contents: prompt,
+      model: MODEL,
+      contents: `Suggest 8 kirana grocery items an Indian neighbourhood shop should stock up on before ${festival}.
+For each: why demand rises, an approximate demand change (e.g. "+70%") and a suggested extra order size. Be realistic.`,
       config: {
         responseMimeType: 'application/json',
         responseSchema: {
@@ -379,237 +390,71 @@ Explain why each item is critical and give an estimated demand surge percentage 
         },
       },
     });
-
-    const parsed = JSON.parse(response.text || '{}');
-    return res.json({ ...parsed, isDemo: false });
+    recordUsage('festival_plan', response.usageMetadata, Date.now() - started);
+    return res.json({ ...JSON.parse(response.text || '{}'), isDemo: false });
   } catch (err) {
-    console.error('Gemini festival-stock error:', err);
-    return res.json(simulateFestivalStock(req.body.festival || 'Diwali'));
+    log('gemini_error', { kind: 'festival_plan', error: errorKind(err), ms: Date.now() - started });
+    return res.json(demoFestivalStock(festival));
   }
 });
 
-// Helper simulation functions for Demo Mode
-function simulateKhataParsing(text: string = '', customers: any[] = [], language: string = 'hinglish') {
-  const lower = text.toLowerCase();
-  let intent: 'add_credit' | 'add_payment' | 'query_balance' | 'list_overdue' | 'add_customer' | 'summary' | 'unknown' = 'add_credit';
+/* ------------------------------------------------------------------ */
+/* Demo data used when no API key is configured                         */
+/* ------------------------------------------------------------------ */
 
-  if (lower.includes('baaki') || lower.includes('kitna') || lower.includes('balance') || lower.includes('hisab')) {
-    intent = 'query_balance';
-  } else if (lower.includes('diye') || lower.includes('jama') || lower.includes('payment') || lower.includes('vasooli') || lower.includes('paid')) {
-    intent = 'add_payment';
-  } else if (lower.includes('overdue') || lower.includes('sabka') || lower.includes('list')) {
-    intent = 'list_overdue';
-  } else if (lower.includes('naya') || lower.includes('customer') || lower.includes('add')) {
-    intent = 'add_customer';
-  } else if (lower.includes('summary') || lower.includes('aaj ka')) {
-    intent = 'summary';
-  }
-
-  // Extract amount with regex or Hindi number words
-  let amount = 0;
-  const numMatch = lower.match(/\b\d+(\.\d+)?\b/);
-  if (numMatch) {
-    amount = parseFloat(numMatch[0]);
-  } else if (lower.includes('paanch sau') || lower.includes('500')) {
-    amount = 500;
-  } else if (lower.includes('dedh sau') || lower.includes('150')) {
-    amount = 150;
-  } else if (lower.includes('dhai sau') || lower.includes('250')) {
-    amount = 250;
-  } else if (lower.includes('hazaar') || lower.includes('1000')) {
-    amount = 1000;
-  } else if (lower.includes('do hazaar') || lower.includes('2000')) {
-    amount = 2000;
-  } else if (lower.includes('sau') || lower.includes('100')) {
-    amount = 100;
-  }
-
-  // Match customer
-  let matchedCustomer = null;
-  let detectedName = 'Sharma Ji';
-
-  if (Array.isArray(customers) && customers.length > 0) {
-    for (const c of customers) {
-      const nameParts = c.name.toLowerCase().split(' ');
-      if (nameParts.some((part: string) => part.length > 2 && lower.includes(part))) {
-        matchedCustomer = c;
-        detectedName = c.name;
-        break;
-      }
-    }
-    if (!matchedCustomer && customers.length > 0) {
-      // Default to first customer if sample phrase matches "sharma"
-      if (lower.includes('sharma')) {
-        matchedCustomer = customers.find((c) => c.name.toLowerCase().includes('sharma')) || customers[0];
-        detectedName = matchedCustomer?.name || 'Sharma Ji';
-      } else if (lower.includes('gupta')) {
-        matchedCustomer = customers.find((c) => c.name.toLowerCase().includes('gupta')) || customers[1];
-        detectedName = matchedCustomer?.name || 'Gupta Ji';
-      }
-    }
-  }
-
-  let botReply = '';
-  if (intent === 'add_credit') {
-    botReply = language === 'hindi'
-      ? `${detectedName} के खाते में ₹${amount || 500} का उधार जोड़ें? कृपया नीचे पुष्टि करें।`
-      : `${detectedName} ke khate mein ₹${amount || 500} ka udhaar jod dein? Kripya neeche confirm karein.`;
-  } else if (intent === 'add_payment') {
-    botReply = language === 'hindi'
-      ? `${detectedName} से ₹${amount || 300} का भुगतान प्राप्त हुआ दर्ज करें?`
-      : `${detectedName} se ₹${amount || 300} jama payment record karein?`;
-  } else if (intent === 'query_balance') {
-    botReply = `${detectedName} ka pichla baaki ₹${matchedCustomer ? 1200 : 1200} hai.`;
-  } else {
-    botReply = `Maine suna: "${text || 'Sharma ji ko 500 udhaar'}". Entry verify karein.`;
-  }
-
-  return {
-    transcript: text || 'Sharma ji ko 500 udhaar, saman ka',
-    intent,
-    customer_name: detectedName,
-    matched_customer_id: matchedCustomer?.id || 'cust-1',
-    amount: amount || (intent === 'query_balance' ? null : 500),
-    items_note: lower.includes('doodh') ? 'Doodh & dahi' : lower.includes('atta') ? 'Atta & tel' : 'Ration saman',
-    confidence: 0.94,
-    needs_clarification: false,
-    clarification_question: null,
-    bot_reply_text: botReply,
-    isDemo: true,
-  };
-}
-
-function simulateShelfAnalysis(catalog: any[] = []) {
+function demoShelfAnalysis() {
   return {
     image_quality_warning: null,
-    overall_notes: 'Scanner ne shelf par 2 bade khali gaps aur 3 low stock items detect kiye hain. (Note: Gaps aur stock level estimate kiya gaya hai, exact unit count nahi).',
-    products: [
-      {
-        name: 'Maggi 2-Minute Noodles',
-        matched_sku: 'maggi-70g',
-        status: 'low',
-        confidence: 0.92,
-        note: 'Front facing par sirf 2 packet bache hain, piche khali space hai.',
-        box_2d: [120, 150, 420, 380],
-      },
-      {
-        name: 'Tata Salt 1kg',
-        matched_sku: 'tata-salt',
-        status: 'out',
-        confidence: 0.95,
-        note: 'Salt shelf poori tarah se khali hai. Gap clearly visible.',
-        box_2d: [140, 410, 430, 680],
-      },
-      {
-        name: 'Fortune Sunlite Sunflower Oil 1L',
-        matched_sku: 'fortune-oil-1l',
-        status: 'low',
-        confidence: 0.88,
-        note: 'Pehle OK tha, ab sirf 1 pouch bacha hai.',
-        box_2d: [480, 160, 820, 420],
-      },
-      {
-        name: 'Parle-G Gold Biscuits',
-        matched_sku: 'parle-g-std',
-        status: 'ok',
-        confidence: 0.96,
-        note: 'Shelf stack full aur well-stocked hai.',
-        box_2d: [490, 450, 830, 880],
-      },
-      {
-        name: 'Surf Excel Quick Wash 1kg',
-        matched_sku: 'surf-excel-1kg',
-        status: 'low',
-        confidence: 0.84,
-        note: 'Detergent section mein stock khatam hone ki sthiti.',
-        box_2d: [130, 710, 440, 920],
-      },
-    ],
+    overall_notes: 'Demo result (no AI key): 1 empty gap and 3 sparse facings. Stock levels are estimated from shelf space, not counted.',
+    products: sanitizeDetections([
+      { name: 'Maggi 2-Minute Noodles', matched_sku: 'maggi-70g', status: 'low', confidence: 0.92, note: 'Front row sparse, back of shelf empty.', box_2d: [120, 150, 420, 380] },
+      { name: 'Tata Salt 1kg', matched_sku: 'tata-salt', status: 'out', confidence: 0.95, note: 'Empty gap where salt is kept.', box_2d: [140, 410, 430, 680] },
+      { name: 'Fortune Sunlite Oil 1L', matched_sku: 'fortune-oil-1l', status: 'low', confidence: 0.88, note: 'Was OK last scan, now mostly empty.', box_2d: [480, 160, 820, 420] },
+      { name: 'Parle-G Biscuits', matched_sku: 'parle-g-std', status: 'ok', confidence: 0.96, note: 'Facing full.', box_2d: [490, 450, 830, 880] },
+      { name: 'Surf Excel 1kg', matched_sku: 'surf-excel-1kg', status: 'low', confidence: 0.84, note: 'Detergent row half empty.', box_2d: [130, 710, 440, 920] },
+    ]),
     isDemo: true,
   };
 }
 
-function generateDefaultReminder(customerName: string, amount: number, tone: string, language: string, shopName = 'Hamari Dukaan', upiId = 'shop@upi') {
-  const upiLink = `upi://pay?pa=${encodeURIComponent(upiId)}&pn=${encodeURIComponent(shopName)}&am=${amount}&cu=INR&tn=Udhaar_Payment`;
-  if (language === 'hindi') {
-    if (tone === 'firm') {
-      return `नमस्ते ${customerName} जी, ${shopName} से आपका पुराना उधार ₹${amount} बाकी है। महीने के खाते का निपटारा करने के लिए कृपया आज ही भुगतान करें: ${upiLink} धन्यवाद।`;
-    } else if (tone === 'friendly') {
-      return `नमस्ते ${customerName} जी! आशा है सब कुशल मंगल है। आपकी दुकान ${shopName} का कुल हिसाब ₹${amount} बकाया है। जब भी समय मिले, UPI से पे कर दें: ${upiLink} शुभ दिन!`;
-    }
-    return `नमस्ते ${customerName} जी, ${shopName} से आपका ₹${amount} का हिसाब बाकी है। सुविधा के लिए सीधे UPI से पेमेंट करें: ${upiLink} आपका बहुत धन्यवाद।`;
-  }
-
-  if (language === 'english') {
-    if (tone === 'firm') {
-      return `Dear ${customerName}, your pending balance at ${shopName} is ₹${amount}. Please clear this today to keep your credit line active: ${upiLink} - Thank you.`;
-    }
-    return `Hello ${customerName}, a gentle reminder from ${shopName}. Your outstanding balance is ₹${amount}. You can pay directly via UPI: ${upiLink} - Have a great day!`;
-  }
-
-  // Hinglish (default)
-  if (tone === 'firm') {
-    return `Namaste ${customerName} ji, ${shopName} se aapka ₹${amount} ka purana udhaar baaki hai. Ledger close karne ke liye kripya aaj hi settle karein. UPI link: ${upiLink} Dhanyawad!`;
-  } else if (tone === 'friendly') {
-    return `Namaste ${customerName} ji! Asha hai sab theek hai. ${shopName} ka ₹${amount} ka hisab baaki chal raha tha. Time mile toh UPI se clear kar dena: ${upiLink} Have a good day!`;
-  }
-  return `Namaste ${customerName} ji, ${shopName} se aapka ₹${amount} ka udhaar bacha hai. Turant pay karne ke liye UPI link: ${upiLink} Shukriya!`;
-}
-
-function simulateFestivalStock(festival: string) {
-  const itemsMap: Record<string, any[]> = {
+function demoFestivalStock(festival: string) {
+  const items: Record<string, Array<Record<string, string>>> = {
     Diwali: [
-      { name: 'Fortune Soya / Mustard Oil', category: 'Cooking Oil', demandSurge: '+120%', reason: 'Pakwan and festive cooking increase by 3x.', recommendedQty: '40 pouches' },
-      { name: 'Madhur Pure Sugar 5kg', category: 'Staples', demandSurge: '+95%', reason: 'Heavy sweet making at every household.', recommendedQty: '50 packets' },
-      { name: 'Aashirvaad Shudh Chakki Atta 10kg', category: 'Flour', demandSurge: '+60%', reason: 'Poori and festive meals bulk preparation.', recommendedQty: '35 bags' },
-      { name: 'Cadbury Celebrations Gift Pack', category: 'Chocolates & Sweets', demandSurge: '+300%', reason: 'Top neighbourhood Diwali gifting choice.', recommendedQty: '60 boxes' },
-      { name: 'Amul Pure Ghee 1L', category: 'Dairy & Ghee', demandSurge: '+140%', reason: 'Diyas and prasad cooking essential.', recommendedQty: '30 tins' },
-      { name: 'Haldiram Soan Papdi 500g', category: 'Sweets', demandSurge: '+250%', reason: 'Traditional exchange gift SKU.', recommendedQty: '45 packs' },
-      { name: 'Tata Tea Gold 500g', category: 'Beverages', demandSurge: '+50%', reason: 'Guest influx during Diwali week.', recommendedQty: '25 packs' },
-      { name: 'Catch Garam Masala & Spices', category: 'Spices', demandSurge: '+80%', reason: 'Festive feasts and curry preparations.', recommendedQty: '40 boxes' },
-    ],
-    Holi: [
-      { name: 'Madhur Sugar 5kg', category: 'Staples', demandSurge: '+110%', reason: 'Gujiya making sugar syrup demand.', recommendedQty: '50 packets' },
-      { name: 'Amul Ghee 1L', category: 'Dairy', demandSurge: '+130%', reason: 'Mawa and gujiya frying in every house.', recommendedQty: '35 tins' },
-      { name: 'Fortune Refined Oil 1L', category: 'Cooking Oil', demandSurge: '+90%', reason: 'Mathri and namkeen snack frying.', recommendedQty: '45 pouches' },
-      { name: 'Haldiram Namkeen 400g (Aloo Bhujia)', category: 'Snacks', demandSurge: '+150%', reason: 'Holi party dry snacks for visitors.', recommendedQty: '50 packs' },
-      { name: 'Rooh Afza Sharbat 750ml', category: 'Beverages', demandSurge: '+180%', reason: 'Thandai and Holi welcome drinks.', recommendedQty: '40 bottles' },
-      { name: 'Coconut Hair Oil 200ml', category: 'Personal Care', demandSurge: '+200%', reason: 'Pre and post colour skin/hair protection.', recommendedQty: '60 bottles' },
-      { name: 'Dettol Soap 4-pack', category: 'Soaps', demandSurge: '+140%', reason: 'Post colour cleanup essential.', recommendedQty: '40 packs' },
-      { name: 'Surf Excel Matic 1kg', category: 'Detergents', demandSurge: '+110%', reason: 'Heavy cloth stain washing post Holi.', recommendedQty: '30 packs' },
+      { name: 'Mustard / Refined Oil', category: 'Cooking Oil', demandSurge: '+100%', reason: 'Festive frying and sweets', recommendedQty: '2x usual order' },
+      { name: 'Sugar 5kg', category: 'Staples', demandSurge: '+90%', reason: 'Home sweet making', recommendedQty: '2x usual order' },
+      { name: 'Ghee 1L', category: 'Dairy', demandSurge: '+120%', reason: 'Diyas, prasad and sweets', recommendedQty: '2x usual order' },
+      { name: 'Atta 10kg', category: 'Flour', demandSurge: '+50%', reason: 'Puri and guests', recommendedQty: '1.5x usual order' },
+      { name: 'Soan Papdi / gift sweets', category: 'Sweets', demandSurge: '+200%', reason: 'Gifting', recommendedQty: 'Small trial stock' },
+      { name: 'Dry fruits', category: 'Dry Fruits', demandSurge: '+150%', reason: 'Gifting and sweets', recommendedQty: 'Small trial stock' },
+      { name: 'Tea 500g', category: 'Beverages', demandSurge: '+40%', reason: 'Guests at home', recommendedQty: '1.5x usual order' },
+      { name: 'Garam masala & spices', category: 'Spices', demandSurge: '+60%', reason: 'Festive cooking', recommendedQty: '1.5x usual order' },
     ],
   };
-
-  const selectedItems = itemsMap[festival] || itemsMap['Diwali'];
   return {
     festival,
-    summary: `${festival} par kirana bikri aamtaur par 40-70% tak badh jati hai. Saman pehle se stock karke achha munafa kamayein.`,
-    items: selectedItems,
+    summary: `Demo suggestions (no AI key) for ${festival}. Check your own past sales before ordering.`,
+    items: items[festival] ?? items.Diwali,
     isDemo: true,
   };
 }
 
-// In production, serve Vite build files. In dev, mount Vite middleware.
-async function startServer() {
-  const isProd = process.env.NODE_ENV === 'production';
+/* ------------------------------------------------------------------ */
 
-  if (!isProd) {
+app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+  log('request_error', { error: errorKind(err) });
+  res.status(400).json({ error: 'Bad request' });
+});
+
+async function startServer() {
+  if (process.env.NODE_ENV !== 'production') {
     const { createServer: createViteServer } = await import('vite');
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: 'spa',
-    });
+    const vite = await createViteServer({ server: { middlewareMode: true }, appType: 'spa' });
     app.use(vite.middlewares);
   } else {
     app.use(express.static(path.join(__dirname, 'dist')));
-    app.get('*', (req: Request, res: Response) => {
-      res.sendFile(path.join(__dirname, 'dist', 'index.html'));
-    });
+    app.get('*', (_req: Request, res: Response) => res.sendFile(path.join(__dirname, 'dist', 'index.html')));
   }
-
-  app.listen(PORT, () => {
-    console.log(`Dukaan Saathi server running on http://localhost:${PORT}`);
-  });
+  app.listen(PORT, () => log('server_started', { port: PORT, ai: Boolean(ai), model: ai ? MODEL : null }));
 }
 
 startServer();

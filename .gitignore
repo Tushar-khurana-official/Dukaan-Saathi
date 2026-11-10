@@ -6,3 +6,5 @@ coverage/
 *.log
 .env*
 !.env.example
+# real voice recordings are personal data; never commit them
+eval/recordings/

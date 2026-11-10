@@ -20,16 +20,14 @@ import {
   FileText,
   Camera,
   Plus,
+  Download,
 } from 'lucide-react';
-import { Customer, Language, ShopProfile, Transaction } from '../../types';
-import {
-  calculateBharosaScore,
-  formatINR,
-  formatRelativeDate,
-  getOverdueSeverity,
-} from '../../utils/formatters';
+import { Customer, Language, ReminderLog, ShopProfile, Transaction } from '../../types';
+import type { NewCustomer, NewTransaction } from '../../hooks/useLedger';
+import { calculateBharosaScore, formatRelativeDate, getOverdueSeverity } from '../../utils/formatters';
+import { formatPaise, parseRupeeInput } from '../../lib/money';
+import { buildReminderMessage, createWhatsAppUrl } from '../../lib/reminders';
 import { translations } from '../../utils/translations';
-import { createWhatsAppUrl } from '../../utils/whatsapp';
 
 interface KhataScreenProps {
   profile: ShopProfile;
@@ -37,12 +35,19 @@ interface KhataScreenProps {
   customers: Customer[];
   transactions: Transaction[];
   customerBalances: Map<string, { balance: number; lastTxDate?: string }>;
-  onAddTransaction: (tx: Omit<Transaction, 'id' | 'date'>) => Transaction;
-  onAddCustomer: (cust: Omit<Customer, 'id' | 'created_at'>) => Customer;
-  onUpdateCustomer: (id: string, updates: Partial<Customer>) => void;
+  onAddTransaction: (tx: NewTransaction) => Transaction;
+  onAddCustomer: (cust: NewCustomer) => Customer;
+  onRecordConsent: (id: string, phone: string) => void;
+  onWithdrawConsent: (id: string) => void;
   onDeleteCustomer: (id: string) => void;
-  onOpenUpiQr: (customerName: string, customerPhone: string, amount: number) => void;
+  onExportCustomer: (id: string) => object | null;
+  onLogReminderOpened: (log: Pick<ReminderLog, 'customer_id' | 'text' | 'amount_paise' | 'tone'>) => void;
+  onOpenUpiQr: (customerName: string, amountPaise: number) => void;
 }
+
+/** Shown wherever a phone number is collected (DPDP purpose notice). */
+const CONSENT_TEXT =
+  'Grahak ne apna mobile number save karne ki sehmati di hai. Number sirf udhaar ke hisaab aur payment reminder ke liye use hoga.';
 
 export const KhataScreen: React.FC<KhataScreenProps> = ({
   profile,
@@ -52,8 +57,11 @@ export const KhataScreen: React.FC<KhataScreenProps> = ({
   customerBalances,
   onAddTransaction,
   onAddCustomer,
-  onUpdateCustomer,
+  onRecordConsent,
+  onWithdrawConsent,
   onDeleteCustomer,
+  onExportCustomer,
+  onLogReminderOpened,
   onOpenUpiQr,
 }) => {
   const t = translations[language].khata;
@@ -73,6 +81,13 @@ export const KhataScreen: React.FC<KhataScreenProps> = ({
   const [newCustName, setNewCustName] = useState('');
   const [newCustPhone, setNewCustPhone] = useState('');
   const [newCustNote, setNewCustNote] = useState('');
+  const [newCustConsent, setNewCustConsent] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
+
+  // Record consent for an existing customer
+  const [consentPhone, setConsentPhone] = useState('');
+  const [consentChecked, setConsentChecked] = useState(false);
+  const [isConsentFormOpen, setIsConsentFormOpen] = useState(false);
 
   // Filter & search logic
   const filteredCustomers = useMemo(() => {
@@ -109,12 +124,17 @@ export const KhataScreen: React.FC<KhataScreenProps> = ({
   // Handle manual transaction submission
   const handleSaveTransaction = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedCustomer || !txAmount) return;
+    const amountPaise = parseRupeeInput(txAmount);
+    if (!selectedCustomer || amountPaise === null || amountPaise <= 0) {
+      setFormError('Sahi rashi daaliye (jaise 500 ya 99.50)');
+      return;
+    }
+    setFormError(null);
 
     onAddTransaction({
       customer_id: selectedCustomer.id,
       type: txType,
-      amount: parseFloat(txAmount) || 0,
+      amount_paise: amountPaise,
       note: txNote.trim() || (txType === 'credit' ? 'Udhaar Saman' : 'Payment Jama'),
       source: 'manual',
     });
@@ -127,18 +147,83 @@ export const KhataScreen: React.FC<KhataScreenProps> = ({
   const handleSaveCustomer = (e: React.FormEvent) => {
     e.preventDefault();
     if (!newCustName.trim()) return;
+    const phone = newCustPhone.replace(/\D/g, '');
+    if (phone && !/^[6-9]\d{9}$/.test(phone.slice(-10))) {
+      setFormError('10 digit ka mobile number daaliye');
+      return;
+    }
+    if (phone && !newCustConsent) {
+      setFormError('Number save karne se pehle grahak ki sehmati zaroori hai. Sehmati nahi hai to number khali chhodein.');
+      return;
+    }
+    setFormError(null);
 
     const created = onAddCustomer({
       name: newCustName.trim(),
-      phone: newCustPhone.trim(),
+      phone,
       note: newCustNote.trim() || 'General customer',
+      consent_given_at: phone && newCustConsent ? new Date().toISOString() : null,
     });
 
     setNewCustName('');
     setNewCustPhone('');
     setNewCustNote('');
+    setNewCustConsent(false);
     setIsAddCustomerOpen(false);
     setSelectedCustomer(created);
+  };
+
+  const handleRecordConsent = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedCustomer) return;
+    const phone = consentPhone.replace(/\D/g, '');
+    if (!/^[6-9]\d{9}$/.test(phone.slice(-10))) {
+      setFormError('10 digit ka mobile number daaliye');
+      return;
+    }
+    if (!consentChecked) {
+      setFormError('Grahak ki sehmati tick karein');
+      return;
+    }
+    setFormError(null);
+    onRecordConsent(selectedCustomer.id, phone);
+    setSelectedCustomer({ ...selectedCustomer, phone: phone.slice(-10), consent_given_at: new Date().toISOString() });
+    setConsentPhone('');
+    setConsentChecked(false);
+    setIsConsentFormOpen(false);
+  };
+
+  const handleExportCustomer = () => {
+    if (!selectedCustomer) return;
+    const data = onExportCustomer(selectedCustomer.id);
+    if (!data) return;
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = `grahak-data-${selectedCustomer.name.replace(/[^a-z0-9]+/gi, '-').toLowerCase()}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  const handleWhatsAppReminder = () => {
+    if (!selectedCustomer || selectedBalance <= 0) return;
+    const text = buildReminderMessage({
+      amountPaise: selectedBalance,
+      shopName: profile.name,
+      upiId: profile.upi_id,
+      language: profile.reminder_settings.language,
+      tone: profile.reminder_settings.default_tone,
+    });
+    const url = createWhatsAppUrl(selectedCustomer.phone, text);
+    if (!url) return;
+    onLogReminderOpened({
+      customer_id: selectedCustomer.id,
+      text,
+      amount_paise: selectedBalance,
+      tone: profile.reminder_settings.default_tone,
+    });
+    window.open(url, '_blank', 'noopener');
   };
 
   // Selected customer info
@@ -148,7 +233,7 @@ export const KhataScreen: React.FC<KhataScreenProps> = ({
     if (!selectedCustomer) return [];
     return transactions
       .filter((t) => t.customer_id === selectedCustomer.id)
-      .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+      .sort((a, b) => b.confirmed_at.localeCompare(a.confirmed_at));
   }, [selectedCustomer, transactions]);
 
   const bharosa = useMemo(() => {
@@ -268,7 +353,7 @@ export const KhataScreen: React.FC<KhataScreenProps> = ({
                   <div className="min-w-0">
                     <h4 className="text-sm font-extrabold text-[#123D31] truncate">{cust.name}</h4>
                     <p className="text-[11px] text-[#5F7A6E] truncate">
-                      {cust.phone ? `+91 ${cust.phone}` : cust.note || 'Regular grahak'}
+                      {cust.note || 'Regular grahak'}
                     </p>
                   </div>
                 </div>
@@ -295,7 +380,7 @@ export const KhataScreen: React.FC<KhataScreenProps> = ({
                       balance > 0 ? 'text-rose-600' : 'text-emerald-700'
                     }`}
                   >
-                    {formatINR(balance)}
+                    {formatPaise(balance)}
                   </span>
                 </div>
 
@@ -332,7 +417,9 @@ export const KhataScreen: React.FC<KhataScreenProps> = ({
                 <div>
                   <h3 className="font-extrabold text-base">{selectedCustomer.name}</h3>
                   <p className="text-xs text-emerald-200">
-                    {selectedCustomer.phone ? `+91 ${selectedCustomer.phone}` : 'No phone saved'}
+                    {selectedCustomer.phone && selectedCustomer.consent_given_at
+                      ? `+91 ${selectedCustomer.phone} • sehmati ${new Date(selectedCustomer.consent_given_at).toLocaleDateString('en-IN')}`
+                      : 'Phone number save nahi hai'}
                   </p>
                 </div>
               </div>
@@ -351,7 +438,7 @@ export const KhataScreen: React.FC<KhataScreenProps> = ({
                 <div>
                   <span className="text-xs font-semibold text-[#5F7A6E]">Kul Baaki Hisab</span>
                   <div className="text-2xl font-black text-rose-600 tracking-tight">
-                    {formatINR(selectedBalance)}
+                    {formatPaise(selectedBalance)}
                   </div>
                   <span className="text-[11px] font-bold text-gray-500">
                     Last active:{' '}
@@ -405,25 +492,74 @@ export const KhataScreen: React.FC<KhataScreenProps> = ({
                 </button>
 
                 <button
-                  onClick={() =>
-                    onOpenUpiQr(selectedCustomer.name, selectedCustomer.phone, selectedBalance)
-                  }
-                  className="py-2.5 px-3 rounded-xl bg-white hover:bg-emerald-50 text-[#0B3D2E] font-bold text-xs flex items-center justify-center gap-1.5 border border-emerald-200"
+                  onClick={() => onOpenUpiQr(selectedCustomer.name, selectedBalance)}
+                  disabled={selectedBalance <= 0}
+                  className="py-2.5 px-3 rounded-xl bg-white hover:bg-emerald-50 text-[#0B3D2E] font-bold text-xs flex items-center justify-center gap-1.5 border border-emerald-200 disabled:opacity-40"
                 >
                   <QrCode className="w-4 h-4" />
                   <span>UPI QR</span>
                 </button>
 
                 <button
-                  onClick={() => {
-                    const text = `Namaste ${selectedCustomer.name} ji, ${profile.name} se aapka ₹${selectedBalance} ka hisab baaki hai. Kripya UPI se payment karein. Shukriya!`;
-                    window.open(createWhatsAppUrl(selectedCustomer.phone, text), '_blank');
-                  }}
-                  className="py-2.5 px-3 rounded-xl bg-[#1F7A5C] hover:bg-[#19654c] text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-xs"
+                  onClick={handleWhatsAppReminder}
+                  disabled={!selectedCustomer.phone || selectedBalance <= 0}
+                  title={!selectedCustomer.phone ? 'Pehle grahak ki sehmati se number save karein' : 'WhatsApp mein reminder kholein'}
+                  className="py-2.5 px-3 rounded-xl bg-[#1F7A5C] hover:bg-[#19654c] text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-xs disabled:opacity-40"
                 >
                   <Send className="w-4 h-4" />
                   <span>WhatsApp</span>
                 </button>
+              </div>
+
+              {/* Phone & consent (DPDP) */}
+              <div className="p-3 rounded-2xl border border-emerald-100 bg-white text-xs space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-bold text-[#123D31] flex items-center gap-1">
+                    <ShieldCheck className="w-3.5 h-3.5 text-[#1F7A5C]" /> Phone aur sehmati
+                  </span>
+                  {selectedCustomer.consent_given_at ? (
+                    <button
+                      onClick={() => {
+                        if (confirm('Grahak ne sehmati wapas li? Phone number delete ho jayega, udhaar ka hisaab rahega.')) {
+                          onWithdrawConsent(selectedCustomer.id);
+                          setSelectedCustomer({ ...selectedCustomer, phone: '', consent_given_at: null });
+                        }
+                      }}
+                      className="text-rose-600 font-bold hover:underline"
+                    >
+                      Sehmati wapas / number hatao
+                    </button>
+                  ) : (
+                    !isConsentFormOpen && (
+                      <button onClick={() => setIsConsentFormOpen(true)} className="text-[#1F7A5C] font-bold hover:underline">
+                        + Number jodein
+                      </button>
+                    )
+                  )}
+                </div>
+                {!selectedCustomer.consent_given_at && !isConsentFormOpen && (
+                  <p className="text-[11px] text-gray-500">WhatsApp reminder ke liye grahak ki sehmati se number save karein.</p>
+                )}
+                {isConsentFormOpen && (
+                  <form onSubmit={handleRecordConsent} className="space-y-2">
+                    <input
+                      type="tel"
+                      value={consentPhone}
+                      onChange={(e) => setConsentPhone(e.target.value)}
+                      placeholder="10 digit mobile number"
+                      className="w-full p-2 rounded-lg border border-emerald-200"
+                    />
+                    <label className="flex items-start gap-2 text-[11px] text-gray-700">
+                      <input type="checkbox" checked={consentChecked} onChange={(e) => setConsentChecked(e.target.checked)} className="mt-0.5" />
+                      <span>{CONSENT_TEXT}</span>
+                    </label>
+                    {formError && <p className="text-[11px] text-rose-600 font-bold">{formError}</p>}
+                    <div className="flex gap-2">
+                      <button type="submit" className="flex-1 py-1.5 rounded-lg bg-[#0B3D2E] text-white font-bold">Save</button>
+                      <button type="button" onClick={() => setIsConsentFormOpen(false)} className="px-3 py-1.5 rounded-lg bg-gray-100 font-bold">Cancel</button>
+                    </div>
+                  </form>
+                )}
               </div>
 
               {/* Transactions Timeline */}
@@ -455,7 +591,7 @@ export const KhataScreen: React.FC<KhataScreenProps> = ({
                           <div>
                             <p className="font-bold text-[#123D31]">{tx.note || 'Saman'}</p>
                             <p className="text-[10px] text-gray-400">
-                              {formatRelativeDate(tx.date, language)} • Source: {tx.source}
+                              {formatRelativeDate(tx.confirmed_at, language)} • {tx.source}
                             </p>
                           </div>
                         </div>
@@ -466,7 +602,7 @@ export const KhataScreen: React.FC<KhataScreenProps> = ({
                           }`}
                         >
                           {isCredit ? '+' : '-'}
-                          {formatINR(tx.amount)}
+                          {formatPaise(tx.amount_paise)}
                         </span>
                       </div>
                     );
@@ -483,12 +619,13 @@ export const KhataScreen: React.FC<KhataScreenProps> = ({
 
             {/* Footer with Delete / Manage */}
             <div className="p-3 bg-gray-50 border-t border-gray-100 flex justify-between items-center text-xs">
-              <span className="text-[11px] text-gray-400">
-                Created: {new Date(selectedCustomer.created_at).toLocaleDateString()}
-              </span>
+              <button onClick={handleExportCustomer} className="text-[#1F7A5C] hover:underline font-bold flex items-center gap-1">
+                <Download className="w-3.5 h-3.5" />
+                <span>Grahak ka data export</span>
+              </button>
               <button
                 onClick={() => {
-                  if (confirm(`Kya aap sach me ${selectedCustomer.name} ko delete karna chahte hain?`)) {
+                  if (confirm(`${selectedCustomer.name} ka saara data (khata, reminders, phone) hamesha ke liye delete karein? Yeh wapas nahi hoga.`)) {
                     onDeleteCustomer(selectedCustomer.id);
                     setSelectedCustomer(null);
                   }
@@ -496,7 +633,7 @@ export const KhataScreen: React.FC<KhataScreenProps> = ({
                 className="text-rose-600 hover:text-rose-800 font-bold flex items-center gap-1"
               >
                 <Trash2 className="w-3.5 h-3.5" />
-                <span>Delete Grahak</span>
+                <span>Data delete karein</span>
               </button>
             </div>
           </div>
@@ -530,9 +667,9 @@ export const KhataScreen: React.FC<KhataScreenProps> = ({
             <div>
               <label className="text-xs font-bold text-gray-700 block mb-1">Rashi (₹)</label>
               <input
-                type="number"
+                type="text"
+                inputMode="decimal"
                 required
-                min="1"
                 value={txAmount}
                 onChange={(e) => setTxAmount(e.target.value)}
                 placeholder="₹ 500"
@@ -552,6 +689,7 @@ export const KhataScreen: React.FC<KhataScreenProps> = ({
               />
             </div>
 
+            {formError && <p className="text-xs text-rose-600 font-bold">{formError}</p>}
             <div className="flex gap-2 pt-2">
               <button
                 type="submit"
@@ -608,9 +746,15 @@ export const KhataScreen: React.FC<KhataScreenProps> = ({
                 type="tel"
                 value={newCustPhone}
                 onChange={(e) => setNewCustPhone(e.target.value)}
-                placeholder="e.g. 9811234567"
+                placeholder="Optional — sirf grahak ki sehmati se"
                 className="w-full p-2.5 rounded-xl border border-emerald-200 text-xs focus:outline-none focus:ring-2 focus:ring-[#25D366]"
               />
+              {newCustPhone.trim() && (
+                <label className="flex items-start gap-2 mt-2 text-[11px] text-gray-700">
+                  <input type="checkbox" checked={newCustConsent} onChange={(e) => setNewCustConsent(e.target.checked)} className="mt-0.5" />
+                  <span>{CONSENT_TEXT}</span>
+                </label>
+              )}
             </div>
 
             <div>
@@ -624,6 +768,7 @@ export const KhataScreen: React.FC<KhataScreenProps> = ({
               />
             </div>
 
+            {formError && <p className="text-xs text-rose-600 font-bold">{formError}</p>}
             <div className="flex gap-2 pt-2">
               <button
                 type="submit"

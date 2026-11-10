@@ -1,5 +1,7 @@
 import { Language, Transaction } from '../types';
 
+export { formatPaise } from '../lib/money';
+
 /**
  * Format numbers according to Indian grouping system: ₹1,25,000
  */
@@ -119,11 +121,11 @@ export function calculateBharosaScore(transactions: Transaction[]): {
 
   const totalCredit = transactions
     .filter((t) => t.type === 'credit')
-    .reduce((sum, t) => sum + t.amount, 0);
+    .reduce((sum, t) => sum + t.amount_paise, 0);
 
   const totalPaid = transactions
     .filter((t) => t.type === 'payment')
-    .reduce((sum, t) => sum + t.amount, 0);
+    .reduce((sum, t) => sum + t.amount_paise, 0);
 
   if (totalCredit === 0) {
     return { score: 95, badge: 'Bharosemand', color: 'text-emerald-700 bg-emerald-50 border-emerald-200', repaymentRatio: 100 };

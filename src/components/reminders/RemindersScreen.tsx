@@ -8,15 +8,15 @@ import {
   Clock,
   Users,
   ChevronRight,
-  RefreshCw,
   ExternalLink,
   History,
+  ShieldCheck,
 } from 'lucide-react';
 import { Customer, Language, ReminderLog, ReminderTone, ShopProfile } from '../../types';
-import { formatINR, formatRelativeDate } from '../../utils/formatters';
+import { formatRelativeDate } from '../../utils/formatters';
+import { formatPaise } from '../../lib/money';
+import { buildReminderMessage, createWhatsAppUrl, isValidUpiId } from '../../lib/reminders';
 import { translations } from '../../utils/translations';
-import { generateReminderText } from '../../services/api';
-import { createWhatsAppUrl } from '../../utils/whatsapp';
 
 interface RemindersScreenProps {
   profile: ShopProfile;
@@ -24,8 +24,9 @@ interface RemindersScreenProps {
   customers: Customer[];
   customerBalances: Map<string, { balance: number; lastTxDate?: string }>;
   reminders: ReminderLog[];
-  onLogReminder: (log: Omit<ReminderLog, 'id' | 'sent_at'>) => void;
-  onOpenUpiQr: (customerName: string, customerPhone: string, amount: number) => void;
+  onUpdateProfile: (p: ShopProfile) => void;
+  onLogReminderOpened: (log: Pick<ReminderLog, 'customer_id' | 'text' | 'amount_paise' | 'tone'>) => void;
+  onOpenUpiQr: (customerName: string, amountPaise: number) => void;
 }
 
 export const RemindersScreen: React.FC<RemindersScreenProps> = ({
@@ -34,7 +35,8 @@ export const RemindersScreen: React.FC<RemindersScreenProps> = ({
   customers,
   customerBalances,
   reminders,
-  onLogReminder,
+  onUpdateProfile,
+  onLogReminderOpened,
   onOpenUpiQr,
 }) => {
   const t = translations[language].reminders;
@@ -61,9 +63,13 @@ export const RemindersScreen: React.FC<RemindersScreenProps> = ({
   const [selectedCustomerId, setSelectedCustomerId] = useState<string>(
     pendingCustomers[0]?.id || ''
   );
-  const [tone, setTone] = useState<ReminderTone>('polite');
-  const [reminderMessage, setReminderMessage] = useState('');
-  const [isGenerating, setIsGenerating] = useState(false);
+  const tone = profile.reminder_settings.default_tone;
+  const msgLanguage = profile.reminder_settings.language;
+  const setTone = (t: ReminderTone) =>
+    onUpdateProfile({ ...profile, reminder_settings: { ...profile.reminder_settings, default_tone: t } });
+  const setMsgLanguage = (l: Language) =>
+    onUpdateProfile({ ...profile, reminder_settings: { ...profile.reminder_settings, language: l } });
+  const upiOk = isValidUpiId(profile.upi_id);
 
   // Bulk Queue State
   const [bulkQueue, setBulkQueue] = useState<string[]>([]);
@@ -71,54 +77,27 @@ export const RemindersScreen: React.FC<RemindersScreenProps> = ({
 
   const activeCustomer = pendingCustomers.find((c) => c.id === selectedCustomerId) || pendingCustomers[0];
 
-  // Refresh or generate message preview
-  const generatePreview = async (cust = activeCustomer, customTone = tone) => {
-    if (!cust) return;
-    setIsGenerating(true);
-    try {
-      const msg = await generateReminderText({
-        customerName: cust.name,
-        amount: cust.balance,
-        daysOverdue: cust.daysOverdue,
-        tone: customTone,
-        language,
-        shopName: profile.name,
-        upiId: profile.upi_id,
-      });
-      setReminderMessage(msg);
-    } catch (e) {
-      console.error('Reminder gen error:', e);
-    } finally {
-      setIsGenerating(false);
-    }
+  // Message contains only the amount, the shop name and the UPI link (DPDP rule in the spec).
+  const messageFor = (amountPaise: number) =>
+    buildReminderMessage({ amountPaise, shopName: profile.name, upiId: profile.upi_id, language: msgLanguage, tone });
+  const reminderMessage = activeCustomer ? messageFor(activeCustomer.balance) : '';
+
+  const canSend = (cust?: (typeof pendingCustomers)[number]) =>
+    Boolean(cust && cust.phone && cust.consent_given_at && upiOk);
+
+  /** Opens WhatsApp with the message prefilled. The owner presses send inside WhatsApp. */
+  const handleOpenWhatsApp = (cust = activeCustomer) => {
+    if (!cust || !canSend(cust)) return;
+    const text = messageFor(cust.balance);
+    const url = createWhatsAppUrl(cust.phone, text);
+    if (!url) return;
+    onLogReminderOpened({ customer_id: cust.id, text, amount_paise: cust.balance, tone });
+    window.open(url, '_blank', 'noopener');
   };
 
-  React.useEffect(() => {
-    if (activeCustomer) {
-      generatePreview(activeCustomer, tone);
-    }
-  }, [selectedCustomerId, tone, language]);
-
-  const handleSendViaWhatsApp = (cust = activeCustomer) => {
-    if (!cust) return;
-
-    // Log the reminder in history
-    onLogReminder({
-      customer_id: cust.id,
-      customer_name: cust.name,
-      channel: 'whatsapp',
-      amount: cust.balance,
-      tone,
-      message_preview: reminderMessage,
-    });
-
-    const url = createWhatsAppUrl(cust.phone || '9811234567', reminderMessage);
-    window.open(url, '_blank');
-  };
-
-  // Bulk reminders setup
+  // Bulk queue: one customer at a time, each opened by the owner.
   const startBulkQueue = () => {
-    const overdueIds = pendingCustomers.filter((c) => c.daysOverdue >= 7).map((c) => c.id);
+    const overdueIds = pendingCustomers.filter((c) => c.daysOverdue >= 7 && canSend(c)).map((c) => c.id);
     setBulkQueue(overdueIds);
     setCurrentQueueIndex(0);
     if (overdueIds.length > 0) {
@@ -128,7 +107,7 @@ export const RemindersScreen: React.FC<RemindersScreenProps> = ({
 
   const handleBulkNext = () => {
     if (activeCustomer) {
-      handleSendViaWhatsApp(activeCustomer);
+      handleOpenWhatsApp(activeCustomer);
     }
     if (currentQueueIndex < bulkQueue.length - 1) {
       const nextIdx = currentQueueIndex + 1;
@@ -150,18 +129,18 @@ export const RemindersScreen: React.FC<RemindersScreenProps> = ({
             <h2 className="text-xl font-black tracking-tight">{t.title}</h2>
           </div>
           <p className="text-xs text-emerald-200">
-            {t.subtitle} • Real WhatsApp deep links + instant UPI payment
+            {t.subtitle} • WhatsApp khulta hai, bhejna aap dabate hain. Kuch apne-aap nahi jaata.
           </p>
         </div>
 
         {/* Start Bulk Reminders */}
-        {pendingCustomers.length > 1 && (
+        {pendingCustomers.filter((c) => c.daysOverdue >= 7 && canSend(c)).length > 1 && (
           <button
             onClick={startBulkQueue}
             className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-[#F5A623] hover:bg-[#e09315] text-[#0B3D2E] font-extrabold text-xs shadow-xs active:scale-95 transition-all w-fit"
           >
             <Users className="w-4 h-4" />
-            <span>Bulk Reminder Queue ({pendingCustomers.length} Grahak)</span>
+            <span>Ek-ek karke reminder ({pendingCustomers.filter((c) => c.daysOverdue >= 7 && canSend(c)).length} grahak)</span>
           </button>
         )}
       </div>
@@ -174,7 +153,7 @@ export const RemindersScreen: React.FC<RemindersScreenProps> = ({
               Bulk Queue Chal Raha Hai: Step {currentQueueIndex + 1} of {bulkQueue.length}
             </span>
             <p className="text-[11px] text-amber-700">
-              Grahak: <span className="font-bold">{activeCustomer?.name}</span> ({formatINR(activeCustomer?.balance)})
+              Grahak: <span className="font-bold">{activeCustomer?.name}</span> ({formatPaise(activeCustomer?.balance)})
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -182,7 +161,7 @@ export const RemindersScreen: React.FC<RemindersScreenProps> = ({
               onClick={handleBulkNext}
               className="px-3.5 py-1.5 rounded-xl bg-[#25D366] text-[#0B3D2E] text-xs font-bold flex items-center gap-1 shadow-xs"
             >
-              <span>Bhejo & Agla</span>
+              <span>WhatsApp kholo & agla</span>
               <ChevronRight className="w-4 h-4" />
             </button>
             <button
@@ -221,7 +200,7 @@ export const RemindersScreen: React.FC<RemindersScreenProps> = ({
                   <div className="min-w-0 pr-2">
                     <h4 className="text-xs font-extrabold text-[#123D31] truncate">{cust.name}</h4>
                     <p className="text-[10px] text-[#5F7A6E]">
-                      {cust.daysOverdue} din pehle • {cust.phone ? `+91 ${cust.phone}` : 'No phone'}
+                      {cust.daysOverdue} din pehle • {cust.phone && cust.consent_given_at ? 'WhatsApp ready' : 'Number/sehmati nahi'}
                     </p>
                   </div>
 
@@ -231,7 +210,7 @@ export const RemindersScreen: React.FC<RemindersScreenProps> = ({
                         isOverdue ? 'text-rose-600' : 'text-amber-700'
                       }`}
                     >
-                      {formatINR(cust.balance)}
+                      {formatPaise(cust.balance)}
                     </span>
                     <span
                       className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full ${
@@ -290,18 +269,31 @@ export const RemindersScreen: React.FC<RemindersScreenProps> = ({
                 </div>
               </div>
 
+              {/* Message language (per-shop setting) */}
+              <div>
+                <label className="text-xs font-bold text-[#123D31] block mb-2">Message ki bhasha:</label>
+                <div className="grid grid-cols-3 gap-2">
+                  {(['hinglish', 'hindi', 'english'] as Language[]).map((l) => (
+                    <button
+                      key={l}
+                      onClick={() => setMsgLanguage(l)}
+                      className={`py-1.5 px-3 rounded-xl text-xs font-bold border ${
+                        msgLanguage === l ? 'bg-[#0B3D2E] text-white border-[#0B3D2E]' : 'bg-gray-50 text-gray-700 border-gray-200'
+                      }`}
+                    >
+                      {l === 'hinglish' ? 'Hinglish' : l === 'hindi' ? 'हिंदी' : 'English'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
               {/* Message Preview Box (WhatsApp Style) */}
               <div className="flex-1 flex flex-col">
                 <div className="flex items-center justify-between mb-2">
-                  <span className="text-xs font-bold text-[#5F7A6E]">WhatsApp Message Preview</span>
-                  <button
-                    onClick={() => generatePreview()}
-                    disabled={isGenerating}
-                    className="text-xs font-semibold text-[#1F7A5C] flex items-center gap-1 hover:underline"
-                  >
-                    <RefreshCw className={`w-3.5 h-3.5 ${isGenerating ? 'animate-spin' : ''}`} />
-                    <span>AI Rewrite</span>
-                  </button>
+                  <span className="text-xs font-bold text-[#5F7A6E]">WhatsApp message preview</span>
+                  <span className="text-[10px] text-[#5F7A6E] flex items-center gap-1">
+                    <ShieldCheck className="w-3 h-3" /> Sirf rashi, dukaan ka naam aur UPI link
+                  </span>
                 </div>
 
                 <div className="p-4 rounded-2xl bg-[#E5DDD5]/50 border border-emerald-100 flex-1 relative min-h-[160px] flex items-center">
@@ -316,19 +308,29 @@ export const RemindersScreen: React.FC<RemindersScreenProps> = ({
 
               {/* Action Buttons */}
               <div className="space-y-2 pt-2">
+                {!upiOk && (
+                  <p className="text-[11px] font-bold text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-2">
+                    Settings mein sahi UPI ID daaliye (jaise naam@okaxis), tabhi reminder bhej sakte hain.
+                  </p>
+                )}
+                {upiOk && !canSend(activeCustomer) && (
+                  <p className="text-[11px] font-bold text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-2">
+                    Is grahak ka number grahak ki sehmati se save nahi hai. Khata tab mein "+ Number jodein" se jodein, ya
+                    dukaan par UPI QR dikhayein.
+                  </p>
+                )}
                 <button
-                  onClick={() => handleSendViaWhatsApp(activeCustomer)}
-                  className="w-full py-3.5 px-4 rounded-xl bg-[#25D366] hover:bg-[#20ba59] text-[#0B3D2E] font-black text-sm flex items-center justify-center gap-2 shadow-md active:scale-98 transition-all"
+                  onClick={() => handleOpenWhatsApp(activeCustomer)}
+                  disabled={!canSend(activeCustomer)}
+                  className="w-full py-3.5 px-4 rounded-xl bg-[#25D366] hover:bg-[#20ba59] text-[#0B3D2E] font-black text-sm flex items-center justify-center gap-2 shadow-md active:scale-98 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   <Send className="w-4 h-4 fill-[#0B3D2E]" />
-                  <span>{t.btnSendWhatsApp} (wa.me)</span>
+                  <span>{t.btnSendWhatsApp}</span>
                   <ExternalLink className="w-3.5 h-3.5 opacity-70" />
                 </button>
 
                 <button
-                  onClick={() =>
-                    onOpenUpiQr(activeCustomer.name, activeCustomer.phone, activeCustomer.balance)
-                  }
+                  onClick={() => onOpenUpiQr(activeCustomer.name, activeCustomer.balance)}
                   className="w-full py-2.5 px-3 rounded-xl bg-gray-50 hover:bg-emerald-50 text-[#0B3D2E] font-bold text-xs flex items-center justify-center gap-1.5 border border-emerald-200"
                 >
                   <QrCode className="w-4 h-4" />
@@ -358,19 +360,19 @@ export const RemindersScreen: React.FC<RemindersScreenProps> = ({
               className="p-3 rounded-xl bg-gray-50 border border-gray-100 flex items-center justify-between text-xs"
             >
               <div>
-                <span className="font-bold text-[#123D31]">{log.customer_name}</span>
-                <span className="text-gray-400 text-[10px] ml-2">
-                  ({formatRelativeDate(log.sent_at, language)})
+                <span className="font-bold text-[#123D31]">
+                  {customers.find((c) => c.id === log.customer_id)?.name ?? 'Grahak'}
                 </span>
-                <p className="text-[11px] text-gray-500 truncate max-w-sm mt-0.5">
-                  "{log.message_preview.substring(0, 50)}..."
-                </p>
+                <span className="text-gray-400 text-[10px] ml-2">
+                  ({formatRelativeDate(log.link_opened_at, language)})
+                </span>
+                <p className="text-[11px] text-gray-500 truncate max-w-sm mt-0.5">"{log.text.substring(0, 50)}..."</p>
               </div>
 
               <div className="text-right">
-                <span className="font-bold text-rose-600 block">{formatINR(log.amount)}</span>
+                <span className="font-bold text-rose-600 block">{formatPaise(log.amount_paise)}</span>
                 <span className="text-[10px] font-semibold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-md border border-emerald-100">
-                  WhatsApp Sent
+                  WhatsApp khola
                 </span>
               </div>
             </div>
@@ -378,7 +380,7 @@ export const RemindersScreen: React.FC<RemindersScreenProps> = ({
 
           {reminders.length === 0 && (
             <p className="text-xs text-gray-400 italic text-center py-4">
-              Abhi tak koi reminder nahi bheja gaya.
+              Abhi tak koi reminder nahi khola gaya.
             </p>
           )}
         </div>

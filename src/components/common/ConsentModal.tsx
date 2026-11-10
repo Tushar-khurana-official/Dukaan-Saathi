@@ -1,25 +1,25 @@
 import React, { useState } from 'react';
 import { ShieldCheck, Store, ArrowRight, Sparkles, CheckSquare, Square } from 'lucide-react';
 import { Language, ShopProfile } from '../../types';
+import { isValidUpiId } from '../../lib/reminders';
 
 interface ConsentModalProps {
   isOpen: boolean;
+  profile: ShopProfile;
   onComplete: (profile: ShopProfile) => void;
-  onLoadDemoData: () => void;
+  /** Clear the demo ledger so a real shop starts with an empty khata. */
+  onStartEmpty: () => void;
 }
 
-export const ConsentModal: React.FC<ConsentModalProps> = ({
-  isOpen,
-  onComplete,
-  onLoadDemoData,
-}) => {
-  const [step, setStep] = useState<1 | 2 | 3>(1);
-  const [shopName, setShopName] = useState('Gupta Kirana Store');
-  const [ownerName, setOwnerName] = useState('Ramesh Gupta');
-  const [upiId, setUpiId] = useState('guptakirana@okaxis');
-  const [language, setLanguage] = useState<Language>('hinglish');
+export const ConsentModal: React.FC<ConsentModalProps> = ({ isOpen, profile, onComplete, onStartEmpty }) => {
+  const [shopName, setShopName] = useState(profile.name);
+  const [ownerName, setOwnerName] = useState(profile.owner);
+  const [upiId, setUpiId] = useState(profile.upi_id);
+  const [language, setLanguage] = useState<Language>(profile.language);
   const [consentAccepted, setConsentAccepted] = useState(false);
   const [consentError, setConsentError] = useState(false);
+  const [upiError, setUpiError] = useState(false);
+  const [mode, setMode] = useState<'demo' | 'empty'>('demo');
 
   if (!isOpen) return null;
 
@@ -29,12 +29,20 @@ export const ConsentModal: React.FC<ConsentModalProps> = ({
       setConsentError(true);
       return;
     }
-
+    if (!isValidUpiId(upiId)) {
+      setUpiError(true);
+      return;
+    }
+    if (mode === 'empty') onStartEmpty();
     onComplete({
+      ...profile,
+      id: mode === 'empty' ? `shop-${Date.now().toString(36)}` : profile.id,
+      created_at: mode === 'empty' ? new Date().toISOString() : profile.created_at,
       name: shopName.trim() || 'Hamari Dukaan',
-      owner: ownerName.trim() || 'Shopkeeper',
-      upi_id: upiId.trim() || 'shop@upi',
+      owner: ownerName.trim(),
+      upi_id: upiId.trim(),
       language,
+      reminder_settings: { ...profile.reminder_settings, language },
       consent_accepted: true,
     });
   };
@@ -110,12 +118,15 @@ export const ConsentModal: React.FC<ConsentModalProps> = ({
               type="text"
               required
               value={upiId}
-              onChange={(e) => setUpiId(e.target.value)}
+              onChange={(e) => {
+                setUpiId(e.target.value);
+                setUpiError(false);
+              }}
               placeholder="e.g. 9811234567@okaxis ya shop@upi"
               className="w-full px-3.5 py-2.5 rounded-xl border border-emerald-200 focus:outline-none focus:ring-2 focus:ring-[#25D366] text-sm font-mono"
             />
-            <p className="text-[11px] text-[#5F7A6E] mt-1">
-              Grahak ke WhatsApp reminder mein yeh UPI link jud jayega.
+            <p className={`text-[11px] mt-1 ${upiError ? 'text-rose-600 font-bold' : 'text-[#5F7A6E]'}`}>
+              {upiError ? 'UPI ID aisi dikhni chahiye: naam@bank' : 'Grahak ke WhatsApp reminder mein yeh UPI link jud jayega.'}
             </p>
           </div>
 
@@ -124,11 +135,13 @@ export const ConsentModal: React.FC<ConsentModalProps> = ({
             <div className="flex items-start gap-2.5">
               <ShieldCheck className="w-5 h-5 text-[#1F7A5C] shrink-0 mt-0.5" />
               <div className="text-xs text-[#123D31]">
-                <p className="font-bold mb-0.5">Suraksha aur Data Privacy (DPDP Notice):</p>
-                <p className="text-[#5F7A6E] leading-relaxed">
-                  Aapke grahakon ke naam, mobile number aur bahi-khata balances sirf aapke is mobile/device par safe hain.
-                  Koi bhi customer private data kisi third-party ad network ko nahi bheja jata.
-                </p>
+                <p className="font-bold mb-0.5">Data ka upyog (DPDP notice)</p>
+                <ul className="text-[#5F7A6E] leading-relaxed list-disc pl-4 space-y-0.5">
+                  <li>Grahak ka data sirf udhaar ka hisaab aur payment reminder ke liye hai.</li>
+                  <li>Phone number sirf grahak ki sehmati se save hoga; sehmati ki tareekh likhi jayegi.</li>
+                  <li>Is prototype mein khata sirf isi browser mein rehta hai. Voice/photo samajhne ke liye awaaz, photo aur grahakon ke naam AI (Google Gemini) ko bheje jaate hain — phone number nahi.</li>
+                  <li>Kisi bhi grahak ka data export ya delete kar sakte hain (Khata → grahak).</li>
+                </ul>
               </div>
             </div>
 
@@ -145,7 +158,7 @@ export const ConsentModal: React.FC<ConsentModalProps> = ({
                 <Square className={`w-5 h-5 ${consentError ? 'text-rose-500' : 'text-emerald-700'}`} />
               )}
               <span className="text-xs font-bold text-[#123D31]">
-                Main privacy sharton se sehmat hoon (I accept)
+                Main samajh gaya/gayi aur sehmat hoon
               </span>
             </label>
             {consentError && (
@@ -155,23 +168,35 @@ export const ConsentModal: React.FC<ConsentModalProps> = ({
             )}
           </div>
 
-          {/* Action Buttons */}
-          <div className="pt-2 space-y-2.5">
-            <button
-              type="submit"
-              className="w-full py-3.5 px-4 rounded-xl bg-[#0B3D2E] hover:bg-[#124b39] text-white font-bold text-sm flex items-center justify-center gap-2 shadow-md active:scale-98 transition-all"
-            >
-              <span>Shuru Karein (Get Started)</span>
-              <ArrowRight className="w-4 h-4" />
-            </button>
-
+          {/* Start with demo data or an empty khata */}
+          <div className="grid grid-cols-2 gap-2 text-xs">
             <button
               type="button"
-              onClick={onLoadDemoData}
-              className="w-full py-3 px-4 rounded-xl bg-[#F5A623] hover:bg-[#e09315] text-[#0B3D2E] font-bold text-xs flex items-center justify-center gap-2 shadow-xs active:scale-98 transition-all"
+              onClick={() => setMode('demo')}
+              className={`p-2.5 rounded-xl border font-bold flex items-center justify-center gap-1.5 ${
+                mode === 'demo' ? 'bg-[#F5A623] border-[#F5A623] text-[#0B3D2E]' : 'bg-white border-gray-200 text-gray-600'
+              }`}
             >
-              <Sparkles className="w-4 h-4" />
-              <span>Demo Data Ke Saath Try Karo (Instant 12 Customers)</span>
+              <Sparkles className="w-4 h-4" /> Demo data (12 grahak)
+            </button>
+            <button
+              type="button"
+              onClick={() => setMode('empty')}
+              className={`p-2.5 rounded-xl border font-bold ${
+                mode === 'empty' ? 'bg-[#0B3D2E] border-[#0B3D2E] text-white' : 'bg-white border-gray-200 text-gray-600'
+              }`}
+            >
+              Khali khata
+            </button>
+          </div>
+
+          <div className="pt-1">
+            <button
+              type="submit"
+              className="w-full py-3.5 px-4 rounded-xl bg-[#0B3D2E] hover:bg-[#124b39] text-white font-bold text-sm flex items-center justify-center gap-2 shadow-md"
+            >
+              <span>Shuru Karein</span>
+              <ArrowRight className="w-4 h-4" />
             </button>
           </div>
         </form>

@@ -1,5 +1,5 @@
 import React from 'react';
-import { Sparkles, Globe, PlayCircle, Store } from 'lucide-react';
+import { Sparkles, Globe, PlayCircle, Store, Settings, MessageCircle } from 'lucide-react';
 import { Language, ShopProfile } from '../../types';
 
 interface HeaderProps {
@@ -7,6 +7,9 @@ interface HeaderProps {
   language: Language;
   onLanguageChange: (lang: Language) => void;
   onOpenDemoGuide: () => void;
+  /** Mobile only: the bottom bar has no room for Chat and Settings. */
+  onOpenSettings?: () => void;
+  onOpenChat?: () => void;
   isAiDemoMode?: boolean;
 }
 
@@ -15,6 +18,8 @@ export const Header: React.FC<HeaderProps> = ({
   language,
   onLanguageChange,
   onOpenDemoGuide,
+  onOpenSettings,
+  onOpenChat,
   isAiDemoMode = false,
 }) => {
   return (
@@ -42,6 +47,16 @@ export const Header: React.FC<HeaderProps> = ({
 
         {/* Action Controls */}
         <div className="flex items-center gap-2 flex-shrink-0">
+          {onOpenChat && (
+            <button onClick={onOpenChat} className="lg:hidden p-1.5 rounded-lg hover:bg-white/10" title="Saathi chat" aria-label="Saathi chat">
+              <MessageCircle className="w-5 h-5" />
+            </button>
+          )}
+          {onOpenSettings && (
+            <button onClick={onOpenSettings} className="lg:hidden p-1.5 rounded-lg hover:bg-white/10" title="Settings" aria-label="Settings">
+              <Settings className="w-5 h-5" />
+            </button>
+          )}
           {/* Demo Guide Stepper Button */}
           <button
             onClick={onOpenDemoGuide}
