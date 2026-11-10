@@ -11,7 +11,9 @@ import {
   ShoppingBag,
 } from 'lucide-react';
 import { Customer, Language, Product, Transaction } from '../../types';
-import { calculateBharosaScore, formatINR } from '../../utils/formatters';
+import { calculateBharosaScore } from '../../utils/formatters';
+import { formatPaise } from '../../lib/money';
+import { repaymentSpeedDays } from '../../lib/ledger';
 import { getFestivalStockSuggestions } from '../../services/api';
 
 interface InsightsScreenProps {
@@ -39,11 +41,11 @@ export const InsightsScreen: React.FC<InsightsScreenProps> = ({
   const stats = React.useMemo(() => {
     const totalCredit = transactions
       .filter((t) => t.type === 'credit')
-      .reduce((sum, t) => sum + t.amount, 0);
+      .reduce((sum, t) => sum + t.amount_paise, 0);
 
     const totalPaid = transactions
       .filter((t) => t.type === 'payment')
-      .reduce((sum, t) => sum + t.amount, 0);
+      .reduce((sum, t) => sum + t.amount_paise, 0);
 
     const recoveryRate = totalCredit > 0 ? Math.min(100, Math.round((totalPaid / totalCredit) * 100)) : 100;
 
@@ -71,7 +73,7 @@ export const InsightsScreen: React.FC<InsightsScreenProps> = ({
       totalCredit,
       totalPaid,
       recoveryRate,
-      avgRepayDays: 14,
+      avgRepayDays: repaymentSpeedDays(transactions).overall,
       bestPayers,
       slowestPayers,
     };
@@ -81,7 +83,7 @@ export const InsightsScreen: React.FC<InsightsScreenProps> = ({
   const loadFestivalData = async (fest = selectedFestival) => {
     setLoadingFestival(true);
     try {
-      const data = await getFestivalStockSuggestions(fest, catalog);
+      const data = await getFestivalStockSuggestions(fest);
       setFestivalData(data);
     } catch (e) {
       console.error('Festival stock load error:', e);
@@ -117,15 +119,17 @@ export const InsightsScreen: React.FC<InsightsScreenProps> = ({
           <span className="text-xs font-semibold text-[#5F7A6E]">Recovery Rate (Vasooli Ratio)</span>
           <div className="text-2xl font-black text-[#1F7A5C] mt-1">{stats.recoveryRate}%</div>
           <p className="text-[11px] text-[#5F7A6E] mt-1">
-            {formatINR(stats.totalPaid)} recovered out of {formatINR(stats.totalCredit)}
+            {formatPaise(stats.totalPaid)} vasooli / {formatPaise(stats.totalCredit)} udhaar
           </p>
         </div>
 
         <div className="bg-white p-4 rounded-2xl shadow-xs border border-emerald-100">
           <span className="text-xs font-semibold text-[#5F7A6E]">Average Days to Repay</span>
-          <div className="text-2xl font-black text-[#0B3D2E] mt-1">14 Din</div>
+          <div className="text-2xl font-black text-[#0B3D2E] mt-1">
+            {stats.avgRepayDays === null ? '—' : `${stats.avgRepayDays} din`}
+          </div>
           <p className="text-[11px] text-[#5F7A6E] mt-1">
-            Grahak aamtaur par 2 hafte mein udhaar chuka dete hain
+            Udhaar se poori vasooli tak ka ausat samay (pehle diya, pehle chuka)
           </p>
         </div>
 
@@ -157,7 +161,7 @@ export const InsightsScreen: React.FC<InsightsScreenProps> = ({
                   <span className="font-bold text-[#123D31]">
                     {i + 1}. {c.name}
                   </span>
-                  <p className="text-[10px] text-gray-500">{c.phone ? `+91 ${c.phone}` : 'Neighbour'}</p>
+                  <p className="text-[10px] text-gray-500">{c.repaymentRatio}% chukaya</p>
                 </div>
                 <div className="text-right">
                   <span className="font-extrabold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-full text-[10px]">
@@ -187,7 +191,7 @@ export const InsightsScreen: React.FC<InsightsScreenProps> = ({
                   <span className="font-bold text-[#123D31]">
                     {i + 1}. {c.name}
                   </span>
-                  <p className="text-[10px] text-gray-500">Baaki: {formatINR(c.balance)}</p>
+                  <p className="text-[10px] text-gray-500">Baaki: {formatPaise(c.balance)}</p>
                 </div>
                 <div className="text-right">
                   <span className="font-extrabold text-rose-700 bg-rose-100 px-2 py-0.5 rounded-full text-[10px]">
@@ -277,7 +281,7 @@ export const InsightsScreen: React.FC<InsightsScreenProps> = ({
                         quantity: 20,
                         unit: 'pkts',
                         supplier_name: 'Tyohar Stock Supplier',
-                        supplier_phone: '9811234567',
+                        supplier_phone: '',
                       })
                     }
                     className="w-full py-1.5 rounded-xl bg-white hover:bg-emerald-100 text-[#0B3D2E] font-bold text-xs border border-emerald-200 transition-colors"

@@ -1,173 +1,100 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
-import { Customer, ReminderLog, ShopProfile, Transaction, TransactionType } from '../types';
+import { Customer, ReminderLog, ShopProfile, Transaction } from '../types';
 import { initialCustomers, initialShopProfile, initialTransactions } from '../utils/seedData';
+import { KEYS, migrateV1, newId, runStorageMigration, safeGet, safeSet } from '../lib/storage';
+import {
+  addDays,
+  computeBalances,
+  dailySeries,
+  pendingAsOf,
+  startOfDay,
+  summarizeRange,
+  topCustomersByCredit,
+} from '../lib/ledger';
 
-const STORAGE_KEYS = {
-  PROFILE: 'dukaan_saathi_profile_v1',
-  CUSTOMERS: 'dukaan_saathi_customers_v1',
-  TRANSACTIONS: 'dukaan_saathi_transactions_v1',
-  REMINDERS: 'dukaan_saathi_reminders_v1',
-};
+runStorageMigration();
 
-function safeGet<T>(key: string, defaultValue: T): T {
-  try {
-    const raw = localStorage.getItem(key);
-    if (!raw) return defaultValue;
-    return JSON.parse(raw);
-  } catch (e) {
-    console.error(`Error reading ${key} from localStorage:`, e);
-    return defaultValue;
-  }
-}
+const AVATAR_COLORS = [
+  'bg-emerald-600', 'bg-indigo-600', 'bg-amber-600', 'bg-rose-600',
+  'bg-cyan-600', 'bg-purple-600', 'bg-teal-600', 'bg-orange-600',
+];
 
-function safeSet<T>(key: string, value: T): void {
-  try {
-    localStorage.setItem(key, JSON.stringify(value));
-  } catch (e) {
-    console.error(`Error writing ${key} to localStorage:`, e);
-  }
-}
+export type NewTransaction = Pick<Transaction, 'customer_id' | 'type' | 'amount_paise' | 'note' | 'source'>;
+export type NewCustomer = Pick<Customer, 'name' | 'phone' | 'note' | 'consent_given_at'>;
 
 export function useLedger() {
-  const [profile, setProfile] = useState<ShopProfile>(() => safeGet(STORAGE_KEYS.PROFILE, initialShopProfile));
-  const [customers, setCustomers] = useState<Customer[]>(() => safeGet(STORAGE_KEYS.CUSTOMERS, initialCustomers));
-  const [transactions, setTransactions] = useState<Transaction[]>(() => safeGet(STORAGE_KEYS.TRANSACTIONS, initialTransactions));
-  const [reminders, setReminders] = useState<ReminderLog[]>(() => safeGet(STORAGE_KEYS.REMINDERS, []));
+  const [profile, setProfile] = useState<ShopProfile>(() => safeGet(KEYS.PROFILE, initialShopProfile));
+  const [customers, setCustomers] = useState<Customer[]>(() => safeGet(KEYS.CUSTOMERS, initialCustomers));
+  const [transactions, setTransactions] = useState<Transaction[]>(() => safeGet(KEYS.TRANSACTIONS, initialTransactions));
+  const [reminders, setReminders] = useState<ReminderLog[]>(() => safeGet(KEYS.REMINDERS, []));
+  const [lastAction, setLastAction] = useState<{ id: string; transaction: Transaction; timestamp: number } | null>(null);
 
-  // Undo stack
-  const [lastAction, setLastAction] = useState<{
-    id: string;
-    transaction: Transaction;
-    timestamp: number;
-  } | null>(null);
+  useEffect(() => safeSet(KEYS.PROFILE, profile), [profile]);
+  useEffect(() => safeSet(KEYS.CUSTOMERS, customers), [customers]);
+  useEffect(() => safeSet(KEYS.TRANSACTIONS, transactions), [transactions]);
+  useEffect(() => safeSet(KEYS.REMINDERS, reminders), [reminders]);
 
-  // Sync to localStorage
-  useEffect(() => {
-    safeSet(STORAGE_KEYS.PROFILE, profile);
-  }, [profile]);
+  const customerBalances = useMemo(
+    () => computeBalances(transactions, customers.map((c) => c.id)),
+    [customers, transactions],
+  );
 
-  useEffect(() => {
-    safeSet(STORAGE_KEYS.CUSTOMERS, customers);
-  }, [customers]);
+  // Re-evaluated on every render so "today" rolls over at midnight without a reload.
+  const today = startOfDay(new Date());
+  const todayKey = today.getTime();
 
-  useEffect(() => {
-    safeSet(STORAGE_KEYS.TRANSACTIONS, transactions);
-  }, [transactions]);
+  /** Dashboard numbers for today, all derived from the same transaction log. */
+  const todaySummary = useMemo(
+    () => summarizeRange(transactions, new Date(todayKey), addDays(new Date(todayKey), 1)),
+    [transactions, todayKey],
+  );
 
-  useEffect(() => {
-    safeSet(STORAGE_KEYS.REMINDERS, reminders);
-  }, [reminders]);
+  const totalUdhaar = useMemo(() => pendingAsOf(transactions, new Date(8.64e15)), [transactions]);
 
-  // Derived: Customer balances
-  const customerBalances = useMemo(() => {
-    const map = new Map<string, { balance: number; lastTxDate?: string; creditTotal: number; paymentTotal: number }>();
-
-    for (const c of customers) {
-      map.set(c.id, { balance: 0, creditTotal: 0, paymentTotal: 0 });
-    }
-
-    // Sort transactions chronologically
-    const sorted = [...transactions].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
-
-    for (const tx of sorted) {
-      const existing = map.get(tx.customer_id) || { balance: 0, creditTotal: 0, paymentTotal: 0 };
-      if (tx.type === 'credit') {
-        existing.balance += tx.amount;
-        existing.creditTotal += tx.amount;
-      } else {
-        existing.balance -= tx.amount;
-        existing.paymentTotal += tx.amount;
-      }
-      existing.lastTxDate = tx.date;
-      map.set(tx.customer_id, existing);
-    }
-
-    return map;
-  }, [customers, transactions]);
-
-  // Overall KPIs
-  const totalUdhaar = useMemo(() => {
-    let sum = 0;
-    customerBalances.forEach((val) => {
-      if (val.balance > 0) sum += val.balance;
-    });
-    return sum;
-  }, [customerBalances]);
-
-  // Today's recovery
-  const todayRecovery = useMemo(() => {
-    const today = new Date().toDateString();
-    return transactions
-      .filter((t) => t.type === 'payment' && new Date(t.date).toDateString() === today)
-      .reduce((sum, t) => sum + t.amount, 0);
-  }, [transactions]);
-
-  // Overdue customers count (> 30 days)
   const overdueCustomers = useMemo(() => {
-    const thirtyDaysAgo = Date.now() - 30 * 24 * 60 * 60 * 1000;
+    const thirtyDaysAgo = Date.now() - 30 * 86_400_000;
     return customers.filter((c) => {
       const info = customerBalances.get(c.id);
-      if (!info || info.balance <= 0) return false;
-      if (!info.lastTxDate) return false;
-      return new Date(info.lastTxDate).getTime() < thirtyDaysAgo;
+      return Boolean(info && info.balance > 0 && info.lastTxDate && new Date(info.lastTxDate).getTime() < thirtyDaysAgo);
     });
   }, [customers, customerBalances]);
 
-  // Top 5 debtors
-  const topDebtors = useMemo(() => {
-    return [...customers]
-      .map((c) => ({
-        ...c,
-        balance: customerBalances.get(c.id)?.balance || 0,
-      }))
-      .filter((c) => c.balance > 0)
-      .sort((a, b) => b.balance - a.balance)
-      .slice(0, 5);
-  }, [customers, customerBalances]);
+  const topDebtors = useMemo(
+    () =>
+      customers
+        .map((c) => ({ ...c, balance: customerBalances.get(c.id)?.balance ?? 0 }))
+        .filter((c) => c.balance > 0)
+        .sort((a, b) => b.balance - a.balance)
+        .slice(0, 5),
+    [customers, customerBalances],
+  );
 
-  // 7-day cash flow for recharts
-  const cashFlow7Days = useMemo(() => {
-    const days: { [dateStr: string]: { date: string; credit: number; payment: number; displayDate: string } } = {};
-    const now = new Date();
+  const topCustomersThisWeek = useMemo(
+    () => topCustomersByCredit(transactions, addDays(new Date(todayKey), -6), addDays(new Date(todayKey), 1)),
+    [transactions, todayKey],
+  );
 
-    for (let i = 6; i >= 0; i--) {
-      const d = new Date(now.getTime() - i * 24 * 60 * 60 * 1000);
-      const key = d.toISOString().split('T')[0];
-      const displayDate = d.toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric' });
-      days[key] = { date: key, displayDate, credit: 0, payment: 0 };
-    }
+  const cashFlow7Days = useMemo(() => dailySeries(transactions, 7), [transactions, todayKey]);
 
-    for (const t of transactions) {
-      const key = t.date.split('T')[0];
-      if (days[key]) {
-        if (t.type === 'credit') {
-          days[key].credit += t.amount;
-        } else {
-          days[key].payment += t.amount;
-        }
+  /** Save a transaction. Callers must only call this after the owner has confirmed the entry. */
+  const addTransaction = useCallback(
+    (tx: NewTransaction) => {
+      if (!Number.isInteger(tx.amount_paise) || tx.amount_paise <= 0) {
+        throw new Error('amount_paise must be a positive integer');
       }
-    }
-
-    return Object.values(days);
-  }, [transactions]);
-
-  // Actions
-  const addTransaction = useCallback((tx: Omit<Transaction, 'id' | 'date'> & { date?: string }) => {
-    const newTx: Transaction = {
-      ...tx,
-      id: `tx-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-      date: tx.date || new Date().toISOString(),
-    };
-
-    setTransactions((prev) => [newTx, ...prev]);
-    setLastAction({
-      id: newTx.id,
-      transaction: newTx,
-      timestamp: Date.now(),
-    });
-
-    return newTx;
-  }, []);
+      if (tx.type !== 'sale' && !tx.customer_id) throw new Error('credit and payment need a customer');
+      const newTx: Transaction = {
+        ...tx,
+        id: newId('tx'),
+        shop_id: profile.id,
+        confirmed_at: new Date().toISOString(),
+      };
+      setTransactions((prev) => [newTx, ...prev]);
+      setLastAction({ id: newTx.id, transaction: newTx, timestamp: Date.now() });
+      return newTx;
+    },
+    [profile.id],
+  );
 
   const undoLastTransaction = useCallback(() => {
     if (!lastAction) return false;
@@ -176,84 +103,113 @@ export function useLedger() {
     return true;
   }, [lastAction]);
 
-  const clearUndo = useCallback(() => {
-    setLastAction(null);
-  }, []);
+  const clearUndo = useCallback(() => setLastAction(null), []);
 
-  const addCustomer = useCallback((customerData: Omit<Customer, 'id' | 'created_at'>) => {
-    const colors = [
-      'bg-emerald-600',
-      'bg-indigo-600',
-      'bg-amber-600',
-      'bg-rose-600',
-      'bg-cyan-600',
-      'bg-purple-600',
-      'bg-teal-600',
-      'bg-orange-600',
-    ];
-    const newCust: Customer = {
-      ...customerData,
-      id: `cust-${Date.now()}`,
-      created_at: new Date().toISOString(),
-      avatar_color: colors[Math.floor(Math.random() * colors.length)],
-    };
+  const addCustomer = useCallback(
+    (data: NewCustomer) => {
+      const phone = data.phone.replace(/\D/g, '').slice(-10);
+      const customer: Customer = {
+        id: newId('cust'),
+        shop_id: profile.id,
+        name: data.name.trim(),
+        // DPDP: never store a phone number without the customer's consent.
+        phone: data.consent_given_at ? phone : '',
+        consent_given_at: phone && data.consent_given_at ? data.consent_given_at : null,
+        note: data.note,
+        created_at: new Date().toISOString(),
+        avatar_color: AVATAR_COLORS[Math.floor(Math.random() * AVATAR_COLORS.length)],
+      };
+      setCustomers((prev) => [customer, ...prev]);
+      return customer;
+    },
+    [profile.id],
+  );
 
-    setCustomers((prev) => [newCust, ...prev]);
-    return newCust;
-  }, []);
-
-  const updateCustomer = useCallback((id: string, updates: Partial<Customer>) => {
+  const updateCustomer = useCallback((id: string, updates: Partial<Pick<Customer, 'name' | 'note'>>) => {
     setCustomers((prev) => prev.map((c) => (c.id === id ? { ...c, ...updates } : c)));
   }, []);
 
+  /** Store a phone number together with the date the customer agreed to it. */
+  const recordConsent = useCallback((id: string, phone: string) => {
+    const digits = phone.replace(/\D/g, '').slice(-10);
+    setCustomers((prev) =>
+      prev.map((c) => (c.id === id ? { ...c, phone: digits, consent_given_at: new Date().toISOString() } : c)),
+    );
+  }, []);
+
+  /** Customer withdrew consent: remove the phone number, keep the udhaar record. */
+  const withdrawConsent = useCallback((id: string) => {
+    setCustomers((prev) => prev.map((c) => (c.id === id ? { ...c, phone: '', consent_given_at: null } : c)));
+  }, []);
+
+  /** DPDP erasure request: removes the customer, their transactions and their reminder history. */
   const deleteCustomer = useCallback((id: string) => {
     setCustomers((prev) => prev.filter((c) => c.id !== id));
     setTransactions((prev) => prev.filter((t) => t.customer_id !== id));
+    setReminders((prev) => prev.filter((r) => r.customer_id !== id));
+    setLastAction((prev) => (prev?.transaction.customer_id === id ? null : prev));
   }, []);
 
-  const logReminder = useCallback((log: Omit<ReminderLog, 'id' | 'sent_at'>) => {
-    const item: ReminderLog = {
-      ...log,
-      id: `rem-${Date.now()}`,
-      sent_at: new Date().toISOString(),
-    };
-    setReminders((prev) => [item, ...prev]);
-  }, []);
+  /** DPDP access request: everything the shop holds about one customer. */
+  const exportCustomerData = useCallback(
+    (id: string) => {
+      const customer = customers.find((c) => c.id === id);
+      if (!customer) return null;
+      return {
+        purpose: 'Udhaar tracking and payment reminders only',
+        shop: profile.name,
+        exported_at: new Date().toISOString(),
+        customer,
+        balance_paise: customerBalances.get(id)?.balance ?? 0,
+        transactions: transactions.filter((t) => t.customer_id === id),
+        reminders: reminders.filter((r) => r.customer_id === id),
+      };
+    },
+    [customers, transactions, reminders, customerBalances, profile.name],
+  );
+
+  /** Log that the owner opened a prefilled WhatsApp link. It does not mean the message was sent. */
+  const logReminderOpened = useCallback(
+    (log: Pick<ReminderLog, 'customer_id' | 'text' | 'amount_paise' | 'tone'>) => {
+      setReminders((prev) => [
+        { ...log, id: newId('rem'), shop_id: profile.id, channel: 'whatsapp', link_opened_at: new Date().toISOString() },
+        ...prev,
+      ]);
+    },
+    [profile.id],
+  );
 
   const resetToDemo = useCallback(() => {
-    safeSet(STORAGE_KEYS.PROFILE, initialShopProfile);
-    safeSet(STORAGE_KEYS.CUSTOMERS, initialCustomers);
-    safeSet(STORAGE_KEYS.TRANSACTIONS, initialTransactions);
-    safeSet(STORAGE_KEYS.REMINDERS, []);
-    setProfile(initialShopProfile);
+    setProfile({ ...initialShopProfile, consent_accepted: true });
     setCustomers(initialCustomers);
     setTransactions(initialTransactions);
     setReminders([]);
     setLastAction(null);
   }, []);
 
-  const exportData = useCallback(() => {
-    return {
-      profile,
-      customers,
-      transactions,
-      reminders,
-      version: '1.0',
-      exported_at: new Date().toISOString(),
-    };
-  }, [profile, customers, transactions, reminders]);
+  /** Start with an empty ledger for a real shop (keeps the profile). */
+  const clearAllData = useCallback(() => {
+    setCustomers([]);
+    setTransactions([]);
+    setReminders([]);
+    setLastAction(null);
+  }, []);
 
-  const importData = useCallback((data: any) => {
-    try {
-      if (data.profile) setProfile(data.profile);
-      if (Array.isArray(data.customers)) setCustomers(data.customers);
-      if (Array.isArray(data.transactions)) setTransactions(data.transactions);
-      if (Array.isArray(data.reminders)) setReminders(data.reminders);
-      return true;
-    } catch (e) {
-      console.error('Import failed:', e);
-      return false;
-    }
+  const exportData = useCallback(
+    () => ({ version: 2, exported_at: new Date().toISOString(), profile, customers, transactions, reminders }),
+    [profile, customers, transactions, reminders],
+  );
+
+  const importData = useCallback((data: unknown) => {
+    if (!data || typeof data !== 'object') return false;
+    const d = data as Record<string, unknown>;
+    if (!Array.isArray(d.customers) || !Array.isArray(d.transactions)) return false;
+    const migrated = migrateV1(d as Parameters<typeof migrateV1>[0]);
+    if (migrated.profile) setProfile(migrated.profile);
+    setCustomers(migrated.customers);
+    setTransactions(migrated.transactions);
+    setReminders(migrated.reminders);
+    return true;
   }, []);
 
   return {
@@ -263,10 +219,11 @@ export function useLedger() {
     transactions,
     reminders,
     customerBalances,
+    todaySummary,
     totalUdhaar,
-    todayRecovery,
     overdueCustomers,
     topDebtors,
+    topCustomersThisWeek,
     cashFlow7Days,
     lastAction,
     addTransaction,
@@ -274,9 +231,13 @@ export function useLedger() {
     clearUndo,
     addCustomer,
     updateCustomer,
+    recordConsent,
+    withdrawConsent,
     deleteCustomer,
-    logReminder,
+    exportCustomerData,
+    logReminderOpened,
     resetToDemo,
+    clearAllData,
     exportData,
     importData,
   };

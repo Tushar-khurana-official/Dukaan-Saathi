@@ -26,20 +26,24 @@ export default function App() {
     transactions,
     reminders,
     customerBalances,
+    todaySummary,
     totalUdhaar,
-    todayRecovery,
     overdueCustomers,
     topDebtors,
+    topCustomersThisWeek,
     cashFlow7Days,
     lastAction,
     addTransaction,
     undoLastTransaction,
     clearUndo,
     addCustomer,
-    updateCustomer,
+    recordConsent,
+    withdrawConsent,
     deleteCustomer,
-    logReminder,
+    exportCustomerData,
+    logReminderOpened,
     resetToDemo: resetLedgerToDemo,
+    clearAllData,
     exportData,
     importData,
   } = useLedger();
@@ -50,6 +54,7 @@ export default function App() {
     reorderList,
     lowStockProducts,
     outOfStockProducts,
+    latestChanges,
     compareWithPreviousScan,
     addScan,
     updateProduct,
@@ -61,36 +66,25 @@ export default function App() {
     populateReorderFromLowStock,
     exportReorderCsv,
     resetStockToDemo,
-  } = useStock();
+  } = useStock(profile.id);
 
   const [currentTab, setCurrentTab] = useState<NavTab>('home');
   const [isDemoGuideOpen, setIsDemoGuideOpen] = useState(false);
   const [externalVoiceTrigger, setExternalVoiceTrigger] = useState(false);
 
   // UPI QR Modal state
-  const [upiQrState, setUpiQrState] = useState<{
-    isOpen: boolean;
-    customerName: string;
-    customerPhone: string;
-    amount: number;
-  }>({
+  const [upiQrState, setUpiQrState] = useState<{ isOpen: boolean; customerName: string; amountPaise: number }>({
     isOpen: false,
-    customerName: 'Sharma Ji',
-    customerPhone: '9811234567',
-    amount: 1200,
+    customerName: '',
+    amountPaise: 0,
   });
 
   const handleLanguageChange = (lang: Language) => {
     setProfile({ ...profile, language: lang });
   };
 
-  const handleOpenUpiQr = (customerName: string, customerPhone: string, amount: number) => {
-    setUpiQrState({
-      isOpen: true,
-      customerName,
-      customerPhone,
-      amount: Math.max(1, amount),
-    });
+  const handleOpenUpiQr = (customerName: string, amountPaise: number) => {
+    setUpiQrState({ isOpen: true, customerName, amountPaise: Math.max(100, amountPaise) });
   };
 
   // Demo step runner from the Demo Guide modal
@@ -122,6 +116,7 @@ export default function App() {
   // Find last action customer name for the undo toast
   const lastActionCustomerName = React.useMemo(() => {
     if (!lastAction) return 'Customer';
+    if (!lastAction.transaction.customer_id) return 'Counter bikri';
     const c = customers.find((cust) => cust.id === lastAction.transaction.customer_id);
     return c?.name || 'Customer';
   }, [lastAction, customers]);
@@ -134,6 +129,8 @@ export default function App() {
         language={profile.language}
         onLanguageChange={handleLanguageChange}
         onOpenDemoGuide={() => setIsDemoGuideOpen(true)}
+        onOpenSettings={() => setCurrentTab('settings')}
+        onOpenChat={() => setCurrentTab('assistant')}
       />
 
       {/* Main Body Layout */}
@@ -156,11 +153,15 @@ export default function App() {
               profile={profile}
               language={profile.language}
               totalUdhaar={totalUdhaar}
-              todayRecovery={todayRecovery}
+              todaySummary={todaySummary}
               lowStockProducts={lowStockProducts}
               outOfStockProducts={outOfStockProducts}
               overdueCustomers={overdueCustomers}
               topDebtors={topDebtors}
+              topCustomersThisWeek={topCustomersThisWeek}
+              customers={customers}
+              transactions={transactions}
+              catalog={catalog}
               cashFlow7Days={cashFlow7Days}
               scans={scans}
               onNavigate={setCurrentTab}
@@ -178,10 +179,12 @@ export default function App() {
               language={profile.language}
               customers={customers}
               customerBalances={customerBalances}
+              todaySummary={todaySummary}
               catalog={catalog}
+              previousScanNotes={scans[0]?.overall_notes}
               onAddTransaction={addTransaction}
               onAddCustomer={addCustomer}
-              onOpenShelfScan={() => setCurrentTab('stock')}
+              onAddScan={addScan}
               externalVoiceTrigger={externalVoiceTrigger}
               onResetVoiceTrigger={() => setExternalVoiceTrigger(false)}
             />
@@ -196,8 +199,11 @@ export default function App() {
               customerBalances={customerBalances}
               onAddTransaction={addTransaction}
               onAddCustomer={addCustomer}
-              onUpdateCustomer={updateCustomer}
+              onRecordConsent={recordConsent}
+              onWithdrawConsent={withdrawConsent}
               onDeleteCustomer={deleteCustomer}
+              onExportCustomer={exportCustomerData}
+              onLogReminderOpened={logReminderOpened}
               onOpenUpiQr={handleOpenUpiQr}
             />
           )}
@@ -209,6 +215,7 @@ export default function App() {
               catalog={catalog}
               scans={scans}
               reorderList={reorderList}
+              latestChanges={latestChanges}
               compareWithPreviousScan={compareWithPreviousScan}
               onAddScan={addScan}
               onUpdateProduct={updateProduct}
@@ -229,7 +236,8 @@ export default function App() {
               customers={customers}
               customerBalances={customerBalances}
               reminders={reminders}
-              onLogReminder={logReminder}
+              onUpdateProfile={setProfile}
+              onLogReminderOpened={logReminderOpened}
               onOpenUpiQr={handleOpenUpiQr}
             />
           )}
@@ -250,6 +258,7 @@ export default function App() {
               profile={profile}
               onUpdateProfile={setProfile}
               onResetToDemo={handleResetAllToDemo}
+              onClearAllData={clearAllData}
               onExportData={exportData}
               onImportData={importData}
             />
@@ -276,8 +285,9 @@ export default function App() {
       {/* DPDP Consent & First Launch Modal */}
       <ConsentModal
         isOpen={!profile.consent_accepted}
+        profile={profile}
         onComplete={(newProfile) => setProfile(newProfile)}
-        onLoadDemoData={handleResetAllToDemo}
+        onStartEmpty={clearAllData}
       />
 
       {/* UPI QR Payment Modal */}
@@ -285,8 +295,7 @@ export default function App() {
         isOpen={upiQrState.isOpen}
         onClose={() => setUpiQrState((prev) => ({ ...prev, isOpen: false }))}
         customerName={upiQrState.customerName}
-        customerPhone={upiQrState.customerPhone}
-        amount={upiQrState.amount}
+        amountPaise={upiQrState.amountPaise}
         shopName={profile.name}
         upiId={profile.upi_id}
       />

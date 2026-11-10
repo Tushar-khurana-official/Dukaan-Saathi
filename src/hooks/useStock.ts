@@ -1,211 +1,131 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { DetectedProduct, Product, ReorderItem, ShelfScan } from '../types';
+import { Product, ReorderItem, ShelfScan } from '../types';
 import { initialPastScans, initialProducts } from '../utils/seedData';
+import { KEYS, newId, safeGet, safeSet } from '../lib/storage';
+import { compareScans, sanitizeDetections, ScanChange } from '../lib/shelf';
+import { matchProduct } from '../lib/productMatch';
 
-const STOCK_STORAGE = {
-  CATALOG: 'dukaan_saathi_catalog_v1',
-  SCANS: 'dukaan_saathi_scans_v1',
-  REORDER: 'dukaan_saathi_reorder_v1',
-};
+export function useStock(shopId: string) {
+  const [catalog, setCatalog] = useState<Product[]>(() => safeGet(KEYS.CATALOG, initialProducts));
+  const [scans, setScans] = useState<ShelfScan[]>(() => safeGet(KEYS.SCANS, initialPastScans));
+  const [reorderList, setReorderList] = useState<ReorderItem[]>(() => safeGet(KEYS.REORDER, []));
 
-function safeGet<T>(key: string, defaultValue: T): T {
-  try {
-    const raw = localStorage.getItem(key);
-    if (!raw) return defaultValue;
-    return JSON.parse(raw);
-  } catch (e) {
-    console.error(`Error reading ${key}:`, e);
-    return defaultValue;
-  }
-}
+  useEffect(() => safeSet(KEYS.CATALOG, catalog), [catalog]);
+  useEffect(() => safeSet(KEYS.SCANS, scans), [scans]);
+  useEffect(() => safeSet(KEYS.REORDER, reorderList), [reorderList]);
 
-function safeSet<T>(key: string, value: T): void {
-  try {
-    localStorage.setItem(key, JSON.stringify(value));
-  } catch (e) {
-    console.error(`Error writing ${key}:`, e);
-  }
-}
+  const lowStockProducts = useMemo(() => catalog.filter((p) => p.stock_status === 'low'), [catalog]);
+  const outOfStockProducts = useMemo(() => catalog.filter((p) => p.stock_status === 'out'), [catalog]);
 
-export function useStock() {
-  const [catalog, setCatalog] = useState<Product[]>(() => safeGet(STOCK_STORAGE.CATALOG, initialProducts));
-  const [scans, setScans] = useState<ShelfScan[]>(() => safeGet(STOCK_STORAGE.SCANS, initialPastScans));
-  const [reorderList, setReorderList] = useState<ReorderItem[]>(() => safeGet(STOCK_STORAGE.REORDER, []));
-
-  useEffect(() => {
-    safeSet(STOCK_STORAGE.CATALOG, catalog);
-  }, [catalog]);
-
-  useEffect(() => {
-    safeSet(STOCK_STORAGE.SCANS, scans);
-  }, [scans]);
-
-  useEffect(() => {
-    safeSet(STOCK_STORAGE.REORDER, reorderList);
-  }, [reorderList]);
-
-  // Derived: Low stock & out of stock products
-  const lowStockProducts = useMemo(() => {
-    return catalog.filter((p) => {
-      const cur = p.current_level ?? 0;
-      return cur > 0 && cur <= p.min_level;
-    });
-  }, [catalog]);
-
-  const outOfStockProducts = useMemo(() => {
-    return catalog.filter((p) => {
-      const cur = p.current_level ?? 0;
-      return cur === 0;
-    });
-  }, [catalog]);
-
-  const latestScan = scans.length > 0 ? scans[0] : null;
-  const previousScan = scans.length > 1 ? scans[1] : null;
-
-  // Compare a product's current detection with its status in the previous scan
-  const compareWithPreviousScan = useCallback(
-    (productName: string, currentStatus: string): { label: string; changed: boolean } | null => {
-      if (!previousScan) return null;
-      const prevProd = previousScan.results.find(
-        (r) => r.name.toLowerCase().includes(productName.toLowerCase()) || productName.toLowerCase().includes(r.name.toLowerCase())
-      );
-      if (!prevProd) return null;
-
-      if (prevProd.status !== currentStatus) {
-        return {
-          label: `Pehle ${prevProd.status.toUpperCase()}, ab ${currentStatus.toUpperCase()}`,
-          changed: true,
-        };
-      }
-      return {
-        label: `Status consistent (${currentStatus.toUpperCase()})`,
-        changed: false,
-      };
-    },
-    [previousScan]
+  /** Status changes between the latest scan and the one before it. */
+  const latestChanges: ScanChange[] = useMemo(
+    () => (scans[0] ? compareScans(scans[0].detected_items, scans[1]?.detected_items ?? null) : []),
+    [scans],
   );
 
-  const addScan = useCallback((scanData: Omit<ShelfScan, 'id' | 'created_at'>) => {
-    const newScan: ShelfScan = {
-      ...scanData,
-      id: `scan-${Date.now()}`,
-      created_at: new Date().toISOString(),
-    };
+  /** Compare a product's status in a scan with the scan just before it. */
+  const compareWithPreviousScan = useCallback(
+    (scanId: string, productName: string, sku: string | null) => {
+      const idx = scans.findIndex((s) => s.id === scanId);
+      if (idx < 0) return null;
+      const current = scans[idx].detected_items.find((d) => (sku && d.matched_sku === sku) || d.name === productName);
+      if (!current) return null;
+      const change = compareScans([current], scans[idx + 1]?.detected_items ?? null)[0];
+      return change.trend === 'new' ? null : change;
+    },
+    [scans],
+  );
 
-    setScans((prev) => [newScan, ...prev]);
+  const addScan = useCallback(
+    (scanData: Pick<ShelfScan, 'image_ref' | 'overall_notes' | 'quality_warning' | 'detected_items'>) => {
+      const items = sanitizeDetections(scanData.detected_items);
+      const newScan: ShelfScan = {
+        ...scanData,
+        detected_items: items,
+        id: newId('scan'),
+        shop_id: shopId,
+        created_at: new Date().toISOString(),
+      };
+      setScans((prev) => [newScan, ...prev].slice(0, 30));
 
-    // Automatically flag items in catalog if detected as low or out
-    setCatalog((prev) => {
-      return prev.map((p) => {
-        const detected = newScan.results.find(
-          (r) => r.matched_sku === p.id || p.name.toLowerCase().includes(r.name.toLowerCase())
-        );
-        if (detected) {
-          if (detected.status === 'out') {
-            return { ...p, current_level: 0 };
-          }
-          if (detected.status === 'low') {
-            return { ...p, current_level: Math.max(1, Math.floor(p.min_level * 0.4)) };
-          }
-          if (detected.status === 'ok') {
-            return { ...p, current_level: Math.max(p.min_level + 5, p.current_level || p.min_level + 5) };
-          }
-        }
-        return p;
-      });
-    });
-
-    return newScan;
-  }, []);
+      // Update each product's last-seen status. Statuses only, never counts.
+      setCatalog((prev) =>
+        prev.map((p) => {
+          const detected = items.find((d) => d.matched_sku === p.id) ??
+            items.find((d) => !d.matched_sku && matchProduct(d.name, [p]) !== null);
+          if (!detected || detected.status === 'unknown') return p;
+          return { ...p, stock_status: detected.status, status_updated_at: newScan.created_at };
+        }),
+      );
+      return newScan;
+    },
+    [shopId],
+  );
 
   const updateProduct = useCallback((id: string, partial: Partial<Product>) => {
     setCatalog((prev) => prev.map((p) => (p.id === id ? { ...p, ...partial } : p)));
   }, []);
 
-  const addProduct = useCallback((prodData: Omit<Product, 'id'>) => {
-    const newProd: Product = {
-      ...prodData,
-      id: `prod-${Date.now()}`,
-    };
-    setCatalog((prev) => [newProd, ...prev]);
-    return newProd;
-  }, []);
+  const addProduct = useCallback(
+    (data: Omit<Product, 'id' | 'shop_id'>) => {
+      const product: Product = { ...data, id: newId('prod'), shop_id: shopId };
+      setCatalog((prev) => [product, ...prev]);
+      return product;
+    },
+    [shopId],
+  );
 
   const addToReorder = useCallback((item: ReorderItem) => {
     setReorderList((prev) => {
       const idx = prev.findIndex((i) => i.product_id === item.product_id);
-      if (idx >= 0) {
-        const copy = [...prev];
-        copy[idx].quantity += item.quantity;
-        return copy;
-      }
-      return [...prev, item];
+      if (idx < 0) return [...prev, item];
+      return prev.map((i, n) => (n === idx ? { ...i, quantity: i.quantity + item.quantity } : i));
     });
   }, []);
 
   const updateReorderQty = useCallback((productId: string, quantity: number) => {
-    setReorderList((prev) => {
-      if (quantity <= 0) {
-        return prev.filter((i) => i.product_id !== productId);
-      }
-      return prev.map((i) => (i.product_id === productId ? { ...i, quantity } : i));
-    });
+    setReorderList((prev) =>
+      quantity <= 0
+        ? prev.filter((i) => i.product_id !== productId)
+        : prev.map((i) => (i.product_id === productId ? { ...i, quantity } : i)),
+    );
   }, []);
 
   const removeFromReorder = useCallback((productId: string) => {
     setReorderList((prev) => prev.filter((i) => i.product_id !== productId));
   }, []);
 
-  const clearReorder = useCallback(() => {
-    setReorderList([]);
-  }, []);
+  const clearReorder = useCallback(() => setReorderList([]), []);
 
+  /** Add every low / out product to the reorder list with its suggested order size. */
   const populateReorderFromLowStock = useCallback(() => {
-    const itemsToAdd: ReorderItem[] = [];
-    catalog.forEach((p) => {
-      const cur = p.current_level ?? 0;
-      if (cur <= p.min_level) {
-        const deficit = Math.max(5, p.min_level * 2 - cur);
-        itemsToAdd.push({
-          product_id: p.id,
-          product_name: p.name,
-          quantity: deficit,
-          unit: p.unit,
-          supplier_name: p.supplier_name,
-          supplier_phone: p.supplier_phone,
-        });
-      }
-    });
-
     setReorderList((prev) => {
-      const map = new Map<string, ReorderItem>();
-      prev.forEach((i) => map.set(i.product_id, { ...i }));
-      itemsToAdd.forEach((i) => {
-        if (!map.has(i.product_id)) {
-          map.set(i.product_id, i);
+      const map = new Map(prev.map((i) => [i.product_id, { ...i }]));
+      for (const p of catalog) {
+        if ((p.stock_status === 'low' || p.stock_status === 'out') && !map.has(p.id)) {
+          map.set(p.id, {
+            product_id: p.id,
+            product_name: p.name,
+            quantity: Math.max(1, p.low_stock_threshold),
+            unit: p.unit,
+            supplier_name: p.supplier_name,
+            supplier_phone: p.supplier_phone,
+          });
         }
-      });
+      }
       return Array.from(map.values());
     });
   }, [catalog]);
 
   const exportReorderCsv = useCallback(() => {
     if (reorderList.length === 0) return '';
-    const headers = ['Product Name', 'Quantity', 'Unit', 'Supplier Name', 'Supplier Phone'];
-    const rows = reorderList.map((i) => [
-      `"${i.product_name.replace(/"/g, '""')}"`,
-      i.quantity,
-      `"${i.unit}"`,
-      `"${i.supplier_name}"`,
-      `"${i.supplier_phone}"`,
-    ]);
+    const q = (v: string | number) => `"${String(v).replace(/"/g, '""')}"`;
+    const headers = ['Product Name', 'Order Quantity', 'Unit', 'Supplier Name', 'Supplier Phone'];
+    const rows = reorderList.map((i) => [q(i.product_name), i.quantity, q(i.unit), q(i.supplier_name), q(i.supplier_phone)]);
     return [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
   }, [reorderList]);
 
   const resetStockToDemo = useCallback(() => {
-    safeSet(STOCK_STORAGE.CATALOG, initialProducts);
-    safeSet(STOCK_STORAGE.SCANS, initialPastScans);
-    safeSet(STOCK_STORAGE.REORDER, []);
     setCatalog(initialProducts);
     setScans(initialPastScans);
     setReorderList([]);
@@ -217,8 +137,7 @@ export function useStock() {
     reorderList,
     lowStockProducts,
     outOfStockProducts,
-    latestScan,
-    previousScan,
+    latestChanges,
     compareWithPreviousScan,
     addScan,
     updateProduct,

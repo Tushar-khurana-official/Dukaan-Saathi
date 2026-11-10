@@ -5,6 +5,8 @@ export interface AudioRecordingResult {
   base64: string;
   duration: number;
   mimeType: string;
+  /** Browser speech-recognition transcript, if the browser supports it ('' otherwise). */
+  transcript: string;
 }
 
 export function useAudioRecorder() {
@@ -21,6 +23,7 @@ export function useAudioRecorder() {
   const analyserRef = useRef<AnalyserNode | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const speechRecognitionRef = useRef<any>(null);
+  const transcriptRef = useRef('');
 
   // Setup Web Speech API fallback if available
   useEffect(() => {
@@ -38,7 +41,8 @@ export function useAudioRecorder() {
           for (let i = 0; i < event.results.length; i++) {
             currentTranscript += event.results[i][0].transcript + ' ';
           }
-          setSpeechTranscript(currentTranscript.trim());
+          transcriptRef.current = currentTranscript.trim();
+          setSpeechTranscript(transcriptRef.current);
         };
 
         speechRecognitionRef.current = recognition;
@@ -51,6 +55,7 @@ export function useAudioRecorder() {
   const startRecording = useCallback(async () => {
     try {
       setSpeechTranscript('');
+      transcriptRef.current = '';
       setRecordingDuration(0);
       audioChunksRef.current = [];
 
@@ -163,6 +168,7 @@ export function useAudioRecorder() {
             base64,
             duration: recordingDuration,
             mimeType,
+            transcript: transcriptRef.current,
           });
         };
         reader.onerror = reject;

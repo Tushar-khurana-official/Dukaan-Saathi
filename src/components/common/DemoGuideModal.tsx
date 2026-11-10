@@ -39,7 +39,7 @@ export const DemoGuideModal: React.FC<DemoGuideModalProps> = ({
       targetTab: 'assistant' as NavTab,
       phrase: '"Sharma ji ko 500 udhaar, saman ka"',
       description:
-        'Kirana shopkeeper taps the mic or types. The AI parses the customer name, amount (₹500), and note. User confirms "Haan, sahi hai" and ledger updates instantly with an Undo toast.',
+        'Tap the mic or type. Dukaan Saathi finds the customer, amount (₹500) and note, then asks "Sahi hai?". The owner can fix the name or amount; nothing is saved until they confirm. An Undo toast follows.',
       buttonLabel: 'Try Step 1: Voice Khata',
     },
     {
@@ -49,7 +49,7 @@ export const DemoGuideModal: React.FC<DemoGuideModalProps> = ({
       targetTab: 'assistant' as NavTab,
       phrase: '"Sharma ji ka kitna baaki hai?"',
       description:
-        'Ask in Hindi or Hinglish. AI looks up Sharma Ji in the ledger, checks recent payments, and replies with his exact pending balance and last purchase date.',
+        'Ask in Hindi or Hinglish. Dukaan Saathi matches the name to the right customer (even with spelling slips) and replies with the pending balance from the ledger.',
       buttonLabel: 'Try Step 2: Balance Query',
     },
     {
@@ -69,7 +69,7 @@ export const DemoGuideModal: React.FC<DemoGuideModalProps> = ({
       targetTab: 'reminders' as NavTab,
       phrase: '"Polite reminder with UPI link"',
       description:
-        'Pick an overdue customer. AI generates a respectful WhatsApp reminder with an embedded upi:// link and QR code. Opens real WhatsApp via wa.me link.',
+        'Pick an overdue customer. A polite reminder in Hinglish, Hindi or English is drafted with only the amount, shop name and UPI link. It opens in WhatsApp; the owner taps send.',
       buttonLabel: 'Try Step 4: Send Reminder',
     },
     {
