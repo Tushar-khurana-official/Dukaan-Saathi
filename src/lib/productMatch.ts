@@ -1,8 +1,8 @@
 /**
  * Match free text ("namak", "Tata Salt 1kg", "maggi 4 pack") to catalog products using names and Hinglish aliases.
  */
-import { jaroWinkler } from './customerMatch';
-import { normalizeText, phoneticKey } from './textNormalize';
+import { jaroWinkler } from './customerMatch.js';
+import { normalizeText, phoneticKey } from './textNormalize.js';
 
 export interface MatchableProduct {
   id: string;
@@ -59,4 +59,22 @@ export function topProductsFromNotes<P extends MatchableProduct>(notes: string[]
     .map(([id, mentions]) => ({ product: catalog.find((p) => p.id === id)!, mentions }))
     .sort((a, b) => b.mentions - a.mentions)
     .slice(0, limit);
+}
+
+const GENERIC_NOTES = new Set(['udhaar saman', 'payment jama', 'counter bikri', 'din ki counter bikri', 'ration saman', 'saman', 'cash', 'upi']);
+
+/** When notes do not match the catalog, show the most common item words people actually wrote. */
+export function topNoteItems(notes: string[], limit = 5) {
+  const counts = new Map<string, { label: string; mentions: number }>();
+  for (const note of notes) {
+    for (const raw of note.split(/,|&|\band\b|\baur\b/i)) {
+      const label = raw.replace(/\d+(\.\d+)?\s*(kg|g|gm|ml|l|ltr|kilo|packet|pkt|pack|tray|bag|pcs)?\b/gi, ' ').replace(/\s+/g, ' ').trim();
+      const key = label.toLowerCase();
+      if (key.length < 3 || GENERIC_NOTES.has(key) || /^(lene|dena|baaki|hai|ka|ki)( |$)/.test(key)) continue;
+      const e = counts.get(key) ?? { label: label.charAt(0).toUpperCase() + label.slice(1), mentions: 0 };
+      e.mentions++;
+      counts.set(key, e);
+    }
+  }
+  return [...counts.values()].sort((a, b) => b.mentions - a.mentions).slice(0, limit);
 }

@@ -26,7 +26,7 @@ import { Customer, Language, ReminderLog, ShopProfile, Transaction } from '../..
 import type { NewCustomer, NewTransaction } from '../../hooks/useLedger';
 import { calculateBharosaScore, formatRelativeDate, getOverdueSeverity } from '../../utils/formatters';
 import { formatPaise, parseRupeeInput } from '../../lib/money';
-import { buildReminderMessage, createWhatsAppUrl } from '../../lib/reminders';
+import { buildReminderMessage, createWhatsAppShareUrl, createWhatsAppUrl } from '../../lib/reminders';
 import { translations } from '../../utils/translations';
 
 interface KhataScreenProps {
@@ -37,6 +37,7 @@ interface KhataScreenProps {
   customerBalances: Map<string, { balance: number; lastTxDate?: string }>;
   onAddTransaction: (tx: NewTransaction) => Transaction;
   onAddCustomer: (cust: NewCustomer) => Customer;
+  onUpdateCustomer: (id: string, updates: Partial<Pick<Customer, 'name' | 'note'>>) => void;
   onRecordConsent: (id: string, phone: string) => void;
   onWithdrawConsent: (id: string) => void;
   onDeleteCustomer: (id: string) => void;
@@ -57,6 +58,7 @@ export const KhataScreen: React.FC<KhataScreenProps> = ({
   customerBalances,
   onAddTransaction,
   onAddCustomer,
+  onUpdateCustomer,
   onRecordConsent,
   onWithdrawConsent,
   onDeleteCustomer,
@@ -82,6 +84,13 @@ export const KhataScreen: React.FC<KhataScreenProps> = ({
   const [newCustPhone, setNewCustPhone] = useState('');
   const [newCustNote, setNewCustNote] = useState('');
   const [newCustConsent, setNewCustConsent] = useState(false);
+  const [isEditingCustomer, setIsEditingCustomer] = useState(false);
+  const [editName, setEditName] = useState('');
+  const [editNote, setEditNote] = useState('');
+
+  /** Same name already in the khata? (two "Paras" make voice matching ambiguous) */
+  const duplicateOf = (name: string, exceptId?: string) =>
+    customers.find((c) => c.id !== exceptId && c.name.trim().toLowerCase() === name.trim().toLowerCase());
   const [formError, setFormError] = useState<string | null>(null);
 
   // Record consent for an existing customer
@@ -147,6 +156,7 @@ export const KhataScreen: React.FC<KhataScreenProps> = ({
   const handleSaveCustomer = (e: React.FormEvent) => {
     e.preventDefault();
     if (!newCustName.trim()) return;
+    if (duplicateOf(newCustName) && !confirm(`"${newCustName.trim()}" naam ka grahak pehle se hai. Phir bhi naya banayein? (Pehchan ke liye naam ke saath gali/kaam likhein, jaise "Paras (Gali 2)")`)) return;
     const phone = newCustPhone.replace(/\D/g, '');
     if (phone && !/^[6-9]\d{9}$/.test(phone.slice(-10))) {
       setFormError('10 digit ka mobile number daaliye');
@@ -215,8 +225,9 @@ export const KhataScreen: React.FC<KhataScreenProps> = ({
       language: profile.reminder_settings.language,
       tone: profile.reminder_settings.default_tone,
     });
-    const url = createWhatsAppUrl(selectedCustomer.phone, text);
-    if (!url) return;
+    const url =
+      (selectedCustomer.phone && selectedCustomer.consent_given_at && createWhatsAppUrl(selectedCustomer.phone, text)) ||
+      createWhatsAppShareUrl(text);
     onLogReminderOpened({
       customer_id: selectedCustomer.id,
       text,
@@ -415,7 +426,41 @@ export const KhataScreen: React.FC<KhataScreenProps> = ({
                   {selectedCustomer.name.substring(0, 2).toUpperCase()}
                 </div>
                 <div>
-                  <h3 className="font-extrabold text-base">{selectedCustomer.name}</h3>
+                  {isEditingCustomer ? (
+                    <form
+                      onSubmit={(e) => {
+                        e.preventDefault();
+                        if (!editName.trim()) return;
+                        if (duplicateOf(editName, selectedCustomer.id) && !confirm('Is naam ka grahak pehle se hai. Phir bhi save karein?')) return;
+                        onUpdateCustomer(selectedCustomer.id, { name: editName.trim(), note: editNote.trim() });
+                        setSelectedCustomer({ ...selectedCustomer, name: editName.trim(), note: editNote.trim() });
+                        setIsEditingCustomer(false);
+                      }}
+                      className="space-y-1.5"
+                    >
+                      <input value={editName} onChange={(e) => setEditName(e.target.value)} className="w-full px-2 py-1 rounded-lg text-[#123D31] text-sm font-bold" />
+                      <input value={editNote} onChange={(e) => setEditNote(e.target.value)} placeholder="Pata / note" className="w-full px-2 py-1 rounded-lg text-[#123D31] text-xs" />
+                      <div className="flex gap-1.5">
+                        <button type="submit" className="px-3 py-1 rounded-lg bg-[#25D366] text-[#0B3D2E] text-xs font-bold">Save</button>
+                        <button type="button" onClick={() => setIsEditingCustomer(false)} className="px-3 py-1 rounded-lg bg-white/15 text-xs font-bold">Cancel</button>
+                      </div>
+                    </form>
+                  ) : (
+                  <h3 className="font-extrabold text-base flex items-center gap-2">
+                    {selectedCustomer.name}
+                    <button
+                      onClick={() => {
+                        setEditName(selectedCustomer.name);
+                        setEditNote(selectedCustomer.note);
+                        setIsEditingCustomer(true);
+                      }}
+                      className="p-1 rounded hover:bg-white/15"
+                      title="Naam / note badlein"
+                    >
+                      <Edit className="w-3.5 h-3.5" />
+                    </button>
+                  </h3>
+                  )}
                   <p className="text-xs text-emerald-200">
                     {selectedCustomer.phone && selectedCustomer.consent_given_at
                       ? `+91 ${selectedCustomer.phone} • sehmati ${new Date(selectedCustomer.consent_given_at).toLocaleDateString('en-IN')}`
@@ -424,7 +469,13 @@ export const KhataScreen: React.FC<KhataScreenProps> = ({
                 </div>
               </div>
               <button
-                onClick={() => setSelectedCustomer(null)}
+                aria-label="Band karein"
+                onClick={() => {
+                  setSelectedCustomer(null);
+                  setIsEditingCustomer(false);
+                  setIsConsentFormOpen(false);
+                  setFormError(null);
+                }}
                 className="w-8 h-8 rounded-full bg-white/10 hover:bg-white/20 flex items-center justify-center text-white"
               >
                 <X className="w-4 h-4" />
@@ -502,8 +553,8 @@ export const KhataScreen: React.FC<KhataScreenProps> = ({
 
                 <button
                   onClick={handleWhatsAppReminder}
-                  disabled={!selectedCustomer.phone || selectedBalance <= 0}
-                  title={!selectedCustomer.phone ? 'Pehle grahak ki sehmati se number save karein' : 'WhatsApp mein reminder kholein'}
+                  disabled={selectedBalance <= 0}
+                  title={selectedCustomer.phone ? 'WhatsApp mein reminder kholein' : 'WhatsApp khulega, contact aap chunenge'}
                   className="py-2.5 px-3 rounded-xl bg-[#1F7A5C] hover:bg-[#19654c] text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-xs disabled:opacity-40"
                 >
                   <Send className="w-4 h-4" />
@@ -738,6 +789,11 @@ export const KhataScreen: React.FC<KhataScreenProps> = ({
                 className="w-full p-2.5 rounded-xl border border-emerald-200 text-xs font-bold focus:outline-none focus:ring-2 focus:ring-[#25D366]"
                 autoFocus
               />
+              {newCustName.trim() && duplicateOf(newCustName) && (
+                <p className="text-[11px] font-bold text-amber-700 mt-1">
+                  Is naam ka grahak pehle se hai. Pehchan ke liye gali/kaam jodein, jaise "{newCustName.trim()} (Gali 2)".
+                </p>
+              )}
             </div>
 
             <div>

@@ -9,7 +9,7 @@
  * Uses Jaro-Winkler similarity on phonetic keys, weighted by how identifying each name token is.
  * When two customers score almost the same the result is marked ambiguous so the owner is asked.
  */
-import { normalizeText, phoneticKey } from './textNormalize';
+import { normalizeText, phoneticKey } from './textNormalize.js';
 
 export interface MatchableCustomer {
   id: string;

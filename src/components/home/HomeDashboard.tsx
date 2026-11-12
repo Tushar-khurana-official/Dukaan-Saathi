@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   Wallet,
   TrendingDown,
@@ -18,12 +18,15 @@ import {
   Package,
 } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend, CartesianGrid } from 'recharts';
-import { Customer, Language, Product, ShelfScan, ShopProfile, Transaction } from '../../types';
+import { Customer, Language, Product, ReminderLog, ShelfScan, ShopProfile, Transaction } from '../../types';
 import { translations } from '../../utils/translations';
 import { formatPaise } from '../../lib/money';
 import { createWhatsAppShareUrl } from '../../lib/reminders';
-import { addDays, RangeSummary, startOfDay } from '../../lib/ledger';
-import { topProductsFromNotes } from '../../lib/productMatch';
+import { addDays, RangeSummary, startOfDay, summarizeRange, topCustomersByCredit } from '../../lib/ledger';
+import { topNoteItems, topProductsFromNotes } from '../../lib/productMatch';
+
+type Period = 'today' | '7d' | '30d' | 'all';
+const PERIOD_LABEL: Record<Period, string> = { today: 'Aaj', '7d': '7 din', '30d': '30 din', all: 'Sab (shuru se)' };
 
 interface HomeDashboardProps {
   profile: ShopProfile;
@@ -37,6 +40,7 @@ interface HomeDashboardProps {
   topCustomersThisWeek: Array<{ customer_id: string; credit_paise: number }>;
   customers: Customer[];
   transactions: Transaction[];
+  reminders: ReminderLog[];
   catalog: Product[];
   cashFlow7Days: Array<RangeSummary & { label: string; date: string }>;
   scans: ShelfScan[];
@@ -57,6 +61,7 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({
   topCustomersThisWeek,
   customers,
   transactions,
+  reminders,
   catalog,
   cashFlow7Days,
   scans,
@@ -66,14 +71,43 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({
 }) => {
   const t = translations[language].home;
 
-  // Top products: catalog items mentioned most in this week's udhaar / sale notes.
-  const topProducts = useMemo(() => {
-    const from = addDays(startOfDay(new Date()), -6).getTime();
+  const [period, setPeriod] = useState<Period>('today');
+
+  // Every number below is computed from the same transaction log for the chosen period.
+  const { from, to } = useMemo(() => {
+    const today = startOfDay(new Date());
+    const end = addDays(today, 1);
+    const start = period === 'today' ? today : period === '7d' ? addDays(today, -6) : period === '30d' ? addDays(today, -29) : new Date(0);
+    return { from: start, to: end };
+  }, [period]);
+  const periodSummary = useMemo(() => (period === 'today' ? todaySummary : summarizeRange(transactions, from, to)), [period, todaySummary, transactions, from, to]);
+  const periodTopCustomers = useMemo(
+    () => (period === '7d' ? topCustomersThisWeek : topCustomersByCredit(transactions, from, to, 5)),
+    [period, topCustomersThisWeek, transactions, from, to],
+  );
+
+  // Top products: catalog items mentioned most in udhaar / sale notes; if none match, the most common note items.
+  const { topProducts, topItems } = useMemo(() => {
     const notes = transactions
-      .filter((tx) => tx.type !== 'payment' && new Date(tx.confirmed_at).getTime() >= from)
+      .filter((tx) => {
+        const t = new Date(tx.confirmed_at).getTime();
+        return tx.type !== 'payment' && t >= from.getTime() && t < to.getTime();
+      })
       .map((tx) => tx.note);
-    return topProductsFromNotes(notes, catalog, 5);
-  }, [transactions, catalog]);
+    const products = topProductsFromNotes(notes, catalog, 5);
+    return { topProducts: products, topItems: products.length ? [] : topNoteItems(notes, 5) };
+  }, [transactions, catalog, from, to]);
+
+  const storeTotals = [
+    { label: 'Grahak', value: customers.length },
+    { label: 'Phone (sehmati se)', value: customers.filter((c) => c.phone && c.consent_given_at).length },
+    { label: 'Kul entries', value: transactions.length },
+    { label: 'Voice entries', value: transactions.filter((t) => t.source === 'voice').length },
+    { label: 'Products', value: catalog.length },
+    { label: 'Shelf photos', value: scans.length },
+    { label: 'Reminders khole', value: reminders.length },
+    { label: 'Kam / khatam items', value: lowStockProducts.length + outOfStockProducts.length },
+  ];
 
   const chartData = cashFlow7Days.map((d) => ({
     label: d.label,
@@ -141,14 +175,42 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({
         </button>
       </div>
 
-      {/* Daily numbers — every tile is a sum over the transaction log for today */}
+      {/* Period filter */}
+      <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar text-xs">
+        {(Object.keys(PERIOD_LABEL) as Period[]).map((p) => (
+          <button
+            key={p}
+            onClick={() => setPeriod(p)}
+            className={`px-3 py-1.5 rounded-xl font-bold whitespace-nowrap border ${
+              period === p ? 'bg-[#0B3D2E] text-white border-[#0B3D2E]' : 'bg-white text-gray-600 border-emerald-100 hover:bg-emerald-50'
+            }`}
+          >
+            {PERIOD_LABEL[p]}
+          </button>
+        ))}
+      </div>
+
+      {/* Every tile is a sum over the transaction log for the chosen period */}
       <div className="grid grid-cols-2 lg:grid-cols-3 gap-3.5">
-        {tile({ label: 'Aaj ki bikri', value: formatPaise(todaySummary.sales_paise), sub: 'Counter sales', icon: <ShoppingCart className="w-4 h-4" />, tone: 'bg-indigo-50 text-indigo-600', onClick: () => onNavigate('assistant') })}
+        {tile({ label: `Bikri (${PERIOD_LABEL[period]})`, value: formatPaise(periodSummary.sales_paise), sub: 'Counter sales', icon: <ShoppingCart className="w-4 h-4" />, tone: 'bg-indigo-50 text-indigo-600', onClick: () => onNavigate('assistant') })}
         {tile({ label: t.totalUdhaar, value: formatPaise(totalUdhaar), sub: 'Kul pending', icon: <Wallet className="w-4 h-4" />, tone: 'bg-rose-50 text-[#E4572E]', onClick: () => onNavigate('khata') })}
-        {tile({ label: t.todayRecovery, value: formatPaise(todaySummary.recovered_paise), sub: 'Aaj jama hua', icon: <TrendingDown className="w-4 h-4" />, tone: 'bg-emerald-50 text-[#1F7A5C]', onClick: () => onNavigate('khata') })}
-        {tile({ label: 'Aaj naya udhaar', value: formatPaise(todaySummary.credit_given_paise), sub: `${todaySummary.transaction_count} entries aaj`, icon: <BookOpen className="w-4 h-4" />, tone: 'bg-amber-50 text-amber-700', onClick: () => onNavigate('khata') })}
+        {tile({ label: `Vasooli (${PERIOD_LABEL[period]})`, value: formatPaise(periodSummary.recovered_paise), sub: 'Jama hua', icon: <TrendingDown className="w-4 h-4" />, tone: 'bg-emerald-50 text-[#1F7A5C]', onClick: () => onNavigate('khata') })}
+        {tile({ label: `Naya udhaar (${PERIOD_LABEL[period]})`, value: formatPaise(periodSummary.credit_given_paise), sub: `${periodSummary.transaction_count} entries`, icon: <BookOpen className="w-4 h-4" />, tone: 'bg-amber-50 text-amber-700', onClick: () => onNavigate('khata') })}
         {tile({ label: t.lowStock, value: <>{lowStockProducts.length + outOfStockProducts.length} <span className="text-xs text-gray-500 font-normal">items</span></>, sub: 'Reorder dekhein', icon: <AlertTriangle className="w-4 h-4" />, tone: 'bg-amber-50 text-[#F5A623]', onClick: () => onNavigate('stock') })}
         {tile({ label: t.overdueCustomers, value: <>{overdueCustomers.length} <span className="text-xs text-gray-500 font-normal">grahak</span></>, sub: '30 din se baaki', icon: <Users className="w-4 h-4" />, tone: 'bg-rose-50 text-rose-600', onClick: () => onNavigate('reminders') })}
+      </div>
+
+      {/* Store ka poora data */}
+      <div className="bg-white p-5 rounded-3xl shadow-xs border border-emerald-100">
+        <h3 className="text-sm font-extrabold text-[#123D31] mb-3">Dukaan ka poora data</h3>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          {storeTotals.map((x) => (
+            <div key={x.label} className="p-3 rounded-2xl bg-[#F2F8F5] border border-emerald-100">
+              <p className="text-[11px] text-[#5F7A6E] font-semibold">{x.label}</p>
+              <p className="text-lg font-black text-[#0B3D2E]">{x.value}</p>
+            </div>
+          ))}
+        </div>
       </div>
 
       {/* Aaj ka hisaab (plain summary, no AI needed) */}
@@ -297,11 +359,20 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <div className="bg-white p-5 rounded-3xl shadow-xs border border-emerald-100">
           <h4 className="text-sm font-extrabold text-[#123D31] flex items-center gap-1.5">
-            <Package className="w-4 h-4 text-[#1F7A5C]" /> Top products (7 din)
+            <Package className="w-4 h-4 text-[#1F7A5C]" /> Top products ({PERIOD_LABEL[period]})
           </h4>
           <p className="text-[11px] text-[#5F7A6E] mb-3">Udhaar/bikri notes mein sabse zyada naam aaye</p>
-          {topProducts.length === 0 ? (
-            <p className="text-xs text-gray-400 italic">Entries mein saman ka naam likhne par yahan dikhega.</p>
+          {topProducts.length === 0 && topItems.length > 0 ? (
+            <ol className="space-y-1.5 text-xs">
+              {topItems.map((p, i) => (
+                <li key={p.label} className="flex justify-between gap-2">
+                  <span className="text-[#123D31] font-semibold truncate">{i + 1}. {p.label}</span>
+                  <span className="text-[#5F7A6E] shrink-0">{p.mentions} baar</span>
+                </li>
+              ))}
+            </ol>
+          ) : topProducts.length === 0 ? (
+            <p className="text-xs text-gray-400 italic">Entries mein saman ka naam likhne par yahan dikhega (jaise "Sharma ji ko 120 udhaar, atta").</p>
           ) : (
             <ol className="space-y-1.5 text-xs">
               {topProducts.map((p, i) => (
@@ -315,21 +386,26 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({
         </div>
         <div className="bg-white p-5 rounded-3xl shadow-xs border border-emerald-100">
           <h4 className="text-sm font-extrabold text-[#123D31] flex items-center gap-1.5">
-            <Users className="w-4 h-4 text-[#1F7A5C]" /> Top grahak (7 din)
+            <Users className="w-4 h-4 text-[#1F7A5C]" /> Top grahak ({PERIOD_LABEL[period]})
           </h4>
-          <p className="text-[11px] text-[#5F7A6E] mb-3">Is hafte sabse zyada udhaar liya</p>
-          {topCustomersThisWeek.length === 0 ? (
-            <p className="text-xs text-gray-400 italic">Is hafte koi udhaar nahi.</p>
+          <p className="text-[11px] text-[#5F7A6E] mb-3">Is samay mein sabse zyada udhaar liya</p>
+          {periodTopCustomers.length === 0 ? (
+            <p className="text-xs text-gray-400 italic">Is samay mein koi udhaar nahi.</p>
           ) : (
             <ol className="space-y-1.5 text-xs">
-              {topCustomersThisWeek.map((c, i) => (
+              {periodTopCustomers.map((c, i) => {
+                const cust = customers.find((x) => x.id === c.customer_id);
+                const sameName = cust && customers.filter((x) => x.name.trim().toLowerCase() === cust.name.trim().toLowerCase()).length > 1;
+                return (
                 <li key={c.customer_id} className="flex justify-between gap-2">
                   <span className="text-[#123D31] font-semibold truncate">
-                    {i + 1}. {customers.find((x) => x.id === c.customer_id)?.name ?? 'Grahak'}
+                    {i + 1}. {cust?.name ?? 'Grahak'}
+                    {sameName && cust?.note ? <span className="text-[#5F7A6E] font-normal"> ({cust.note})</span> : null}
                   </span>
                   <span className="text-rose-600 font-bold shrink-0">{formatPaise(c.credit_paise)}</span>
                 </li>
-              ))}
+                );
+              })}
             </ol>
           )}
         </div>

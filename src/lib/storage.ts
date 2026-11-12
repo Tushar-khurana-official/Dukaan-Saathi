@@ -4,8 +4,8 @@
  * Data saved by the earlier v1 prototype (rupee amounts) is migrated once on first load.
  */
 import type { Customer, Product, ReminderLog, ShelfScan, ShopProfile, Transaction } from '../types';
-import { rupeesToPaise } from './money';
-import { sanitizeDetections } from './shelf';
+import { rupeesToPaise } from './money.js';
+import { sanitizeDetections } from './shelf.js';
 
 export const KEYS = {
   PROFILE: 'dukaan_saathi_profile_v2',
@@ -171,4 +171,69 @@ export function runStorageMigration(): void {
   } catch {
     // ignore: fall back to fresh demo data
   }
+}
+
+/* ---------------------- login: per-shop browser cache ---------------------- */
+
+/** Which account the browser cache belongs to ("demo" or a shop id). */
+export const OWNER_KEY = 'dukaan_saathi_owner';
+
+export interface LocalShopData {
+  profile: ShopProfile;
+  customers: Customer[];
+  transactions: Transaction[];
+  reminders: ReminderLog[];
+  catalog: Product[];
+  scans: ShelfScan[];
+  reorder: unknown[];
+}
+
+export function localOwner(): string | null {
+  try {
+    return localStorage.getItem(OWNER_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export function setLocalOwner(owner: string) {
+  try {
+    localStorage.setItem(OWNER_KEY, owner);
+  } catch {
+    // ignore
+  }
+}
+
+/** Remove the cached khata from this browser (logout on a shared phone, or switching accounts). */
+export function clearLocalData() {
+  try {
+    Object.values(KEYS).forEach((k) => localStorage.removeItem(k));
+    localStorage.removeItem(OWNER_KEY);
+  } catch {
+    // ignore
+  }
+}
+
+export function readLocalData(): LocalShopData | null {
+  const profile = safeGet<ShopProfile | null>(KEYS.PROFILE, null);
+  if (!profile) return null;
+  return {
+    profile,
+    customers: safeGet(KEYS.CUSTOMERS, []),
+    transactions: safeGet(KEYS.TRANSACTIONS, []),
+    reminders: safeGet(KEYS.REMINDERS, []),
+    catalog: safeGet(KEYS.CATALOG, []),
+    scans: safeGet(KEYS.SCANS, []),
+    reorder: safeGet(KEYS.REORDER, []),
+  };
+}
+
+export function writeLocalData(d: LocalShopData) {
+  safeSet(KEYS.PROFILE, d.profile);
+  safeSet(KEYS.CUSTOMERS, d.customers);
+  safeSet(KEYS.TRANSACTIONS, d.transactions);
+  safeSet(KEYS.REMINDERS, d.reminders);
+  safeSet(KEYS.CATALOG, d.catalog);
+  safeSet(KEYS.SCANS, d.scans);
+  safeSet(KEYS.REORDER, d.reorder);
 }

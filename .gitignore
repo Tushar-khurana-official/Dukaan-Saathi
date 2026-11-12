@@ -8,3 +8,6 @@ coverage/
 !.env.example
 # real voice recordings are personal data; never commit them
 eval/recordings/
+
+# local server data (JSON store)
+data/

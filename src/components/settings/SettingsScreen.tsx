@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { Language, ReminderTone, ShopProfile } from '../../types';
 import { isValidUpiId } from '../../lib/reminders';
+import { account } from '../../services/account';
 
 interface SettingsScreenProps {
   profile: ShopProfile;
@@ -25,6 +26,9 @@ interface SettingsScreenProps {
   onClearAllData: () => void;
   onExportData: () => object;
   onImportData: (data: unknown) => boolean;
+  mode: 'shop' | 'demo';
+  accountEmail?: string;
+  onLogout: () => void;
 }
 
 export const SettingsScreen: React.FC<SettingsScreenProps> = ({
@@ -34,7 +38,26 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
   onClearAllData,
   onExportData,
   onImportData,
+  mode,
+  accountEmail,
+  onLogout,
 }) => {
+  const [pwCurrent, setPwCurrent] = useState('');
+  const [pwNext, setPwNext] = useState('');
+  const [pwMsg, setPwMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+  const handleChangePassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      await account.changePassword(pwCurrent, pwNext);
+      setPwMsg({ ok: true, text: 'Password badal gaya' });
+      setPwCurrent('');
+      setPwNext('');
+    } catch (err) {
+      setPwMsg({ ok: false, text: err instanceof Error ? err.message : 'Password nahi badla' });
+    }
+  };
+
   const [shopName, setShopName] = useState(profile.name);
   const [ownerName, setOwnerName] = useState(profile.owner);
   const [upiId, setUpiId] = useState(profile.upi_id);
@@ -212,6 +235,35 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
         </p>
       </div>
 
+      {/* Account */}
+      <div className="bg-white p-5 rounded-3xl shadow-xs border border-emerald-100 space-y-3 text-xs">
+        <h3 className="text-sm font-extrabold text-[#0B3D2E] flex items-center gap-2">
+          <User className="w-4 h-4 text-[#1F7A5C]" />
+          <span>Account</span>
+        </h3>
+        {mode === 'demo' ? (
+          <p className="text-[#5F7A6E]">
+            Aap demo mein hain: data sirf is browser mein hai. Apni dukaan ke liye login karein ya account banayein.
+          </p>
+        ) : (
+          <>
+            <p className="text-[#5F7A6E]">
+              Login: <span className="font-bold text-[#123D31]">{accountEmail}</span>. Khata server par save hota hai aur
+              kisi bhi phone se login karke mil jayega.
+            </p>
+            <form onSubmit={handleChangePassword} className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+              <input type="password" required placeholder="Purana password" value={pwCurrent} onChange={(e) => setPwCurrent(e.target.value)} className="p-2.5 rounded-xl border border-emerald-200" />
+              <input type="password" required minLength={8} placeholder="Naya password (8+)" value={pwNext} onChange={(e) => setPwNext(e.target.value)} className="p-2.5 rounded-xl border border-emerald-200" />
+              <button type="submit" className="py-2.5 rounded-xl bg-[#0B3D2E] text-white font-bold">Password badlein</button>
+            </form>
+            {pwMsg && <p className={`font-bold ${pwMsg.ok ? 'text-emerald-700' : 'text-rose-600'}`}>{pwMsg.text}</p>}
+          </>
+        )}
+        <button onClick={onLogout} className="py-2 px-4 rounded-xl bg-gray-100 hover:bg-gray-200 font-bold text-[#123D31]">
+          {mode === 'demo' ? 'Demo band karein / Login' : 'Logout'}
+        </button>
+      </div>
+
       {/* Data Backup & Restore */}
       <div className="bg-white p-5 rounded-3xl shadow-xs border border-emerald-100 space-y-4">
         <h3 className="text-sm font-extrabold text-[#0B3D2E] flex items-center gap-2">
@@ -220,7 +272,7 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
         </h3>
 
         <p className="text-xs text-[#5F7A6E] leading-relaxed">
-          Is prototype mein saara data sirf isi browser mein hai (server par nahi). Browser data saaf karne par khata mit jayega — backup export karte rahein.
+          {mode === 'shop' ? 'Aapka khata server par save hota hai (upar "Saved" dikhega). Extra safety ke liye JSON backup bhi le sakte hain.' : 'Demo mein data sirf isi browser mein hai. Browser data saaf karne par mit jayega.'}
         </p>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -239,6 +291,7 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
           </label>
 
           <button
+            hidden={mode === 'shop'}
             onClick={() => {
               if (confirm('Kya aap demo data (12 grahak, 40 transactions, 25 SKUs) reload karna chahte hain?')) {
                 onResetToDemo();

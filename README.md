@@ -4,9 +4,21 @@ A WhatsApp-style web app for small Indian kirana shops. The owner records udhaar
 voice or text in Hindi, English or Hinglish, sends UPI payment reminders through WhatsApp, checks shelf gaps
 from a photo, and sees a simple daily dashboard.
 
-**Status:** a working prototype. It follows the build spec *Dukaan Saathi: App Build Spec* (10 Nov 2026).
-Phase 1 ("harden the prototype") is done in code. Phases 2–6 are not started, because the spec says to finish
-each phase and test it with real shopkeepers first. The WhatsApp chat inside the app is a simulation.
+**Status:** a working prototype following *Dukaan Saathi: App Build Spec* (10 Nov 2026). Phase 1 is done in
+code; from Phase 2 there is now email login, per-shop data on the server and an admin dashboard (built on
+Express + Postgres instead of the FastAPI the spec suggests, so the existing TypeScript code is reused).
+The WhatsApp chat inside the app is a simulation; reminders open real WhatsApp and the owner taps send.
+
+## Logins
+
+| Who | Where | How |
+| --- | --- | --- |
+| Shop owner (vendor) | `/` | Email + password. Sign up on the login screen, or the admin creates the account. Each shop's khata is saved on the server and only that shop can read it. |
+| Platform admin | `/admin` | `ADMIN_EMAIL` / `ADMIN_PASSWORD` environment variables (never stored in code). Creates, edits, suspends and deletes vendors, resets passwords, sets plans, sees platform totals and AI usage. |
+| Demo | `/` → "Bina login demo dekhein" | Sample data in this browser only; AI features are off. |
+
+The admin sees shop-level totals only — never a shop's customer names, phone numbers or per-customer
+balances (spec, DPDP section). There is a test for this.
 
 ## Run it
 
@@ -24,7 +36,7 @@ recognition transcript is used when the browser has one.
 | --- | --- |
 | `npm run dev` | Express server + Vite dev server |
 | `npm run build` then `npm start` | Production build served by the same server |
-| `npm test` | 58 unit tests (parser, matching, ledger maths, reminders, shelf rules, migration) |
+| `npm test` | 63 tests (parser, matching, ledger maths, reminders, shelf rules, migration, login, admin privacy, vendor isolation) |
 | `npm run eval` | Parser accuracy on the 50 utterances in `eval/utterances.json` |
 | `npm run eval:voice -- <folder>` | Accuracy on real recordings (see `eval/README.md`) |
 | `npm run lint` | TypeScript check |
@@ -59,8 +71,8 @@ Data saved by the older prototype (rupee amounts) is migrated once on load (`src
 | Consent before storing a phone number, with the date | Add-customer and "+ Number jodein" forms require a consent tick; `consent_given_at` is saved. A phone number without consent is dropped. Consent can be withdrawn (the number is deleted, the khata stays). |
 | Tell the shop what the data is for | Onboarding notice and Settings: udhaar tracking and payment reminders only. |
 | Export or delete a customer's data | Khata → customer → "Grahak ka data export" (JSON) / "Data delete karein" (customer, transactions and reminders). |
-| Balances visible only to the owning shop | Data lives only in this browser in the prototype. Real per-shop isolation needs login (Phase 2). |
-| Admin panel shows aggregates only | Not built (Phase 6). |
+| Balances visible only to the owning shop | Each shop logs in; the API only returns a shop's own data (tested). |
+| Admin panel shows aggregates only | `/admin` stores and shows per-shop totals computed on sync; customer lists are never returned to the admin. |
 | No names or phone numbers in server logs | The server logs JSON events with sizes, timings and token counts only. Request bodies are never logged. |
 | Reminders contain only amount, shop name and UPI link | Templates are fixed code (no AI), with no customer name; a test checks every language and tone. |
 
@@ -83,7 +95,7 @@ per voice entry and per shelf photo, and a cost estimate if you set the price en
 | Reminder opens WhatsApp with amount and UPI link; nothing sent until the owner taps send | ✅ Done; prefilled `wa.me` link, tested |
 | Shelf photo flags low or missing items, never exact counts | ✅ Done; prompt rule plus sanitiser plus tests |
 | Dashboard totals match the transaction log for the same date range | ✅ Done; property test over 20 random logs |
-| Admin panel shows no names, phones or individual balances | ⏳ Not started; the admin panel is Phase 6 |
+| Admin panel shows no names, phones or individual balances | ✅ Done; `/admin` shows shop-level totals only, checked by an end-to-end test |
 | Voice accuracy measured on 50 real noisy recordings, as a percentage | ⏳ Harness ready (`npm run eval:voice`); needs real recordings |
 
 Parser accuracy on the 50-utterance set is 100%. Those utterances were written while building the parser, so
@@ -94,22 +106,35 @@ treat the figure as a regression baseline, not field accuracy (see `eval/README.
 1. **Harden the prototype** — done in code: number parsing, fuzzy matching, 50-utterance eval, paise data
    model, consent, deterministic reminders, count-free shelf results. Still to do: test with real shopkeepers
    and run the real-recording voice eval.
-2. **Backend** (FastAPI, database, login, per-shop data) — not started. Database, hosting and the Hindi
-   speech-to-text provider are open questions in the spec. Gemini calls already run on the server
-   (`server.ts`), so the API key is not exposed.
+2. **Backend** — done in a first version: Express API (`src/server/`), Postgres or JSON-file storage,
+   email login, per-shop data, AI calls on the server behind login. Not done: Google login, a Hindi
+   speech-to-text provider (still Gemini), choosing final hosting.
 3. **WhatsApp Cloud API** — not started (needs a backend and Meta approval).
 4. **Reminders** — templates, per-shop settings and manual send are done; automatic sending waits for
    Phase 3 and the owner's approval.
 5. **Shelf scanner and reorder** — history, comparison and reorder export exist in the prototype.
-6. **Dashboard and admin** — repayment speed and top products exist; trends, slow products, supplier spend
-   and the aggregate-only admin panel are not built.
+6. **Dashboard and admin** — dashboard with Aaj / 7 / 30 din / Sab filter, top products and customers,
+   repayment speed; admin dashboard with vendor management and platform totals. Not built: trends, slow
+   products, supplier spend.
 
 Not in scope (spec): in-app payments, GST invoicing, multi-shop chains, exact inventory counts, automatic
 WhatsApp sending before Cloud API approval. Open questions: pricing, speech-to-text provider, database and
 hosting, data retention, competitor features (not checked).
 
-## Deployment note
+## Deploy on Vercel
 
-On Vercel only the static frontend is deployed, so `/api/*` does not exist there. The app then falls back
-to the in-browser rule-based parser for typed entries and shows demo shelf results. Run `npm start` on a
-Node host to get voice notes and real shelf analysis.
+The API runs as one Vercel function (`api/index.ts`, routed by `vercel.json`); the React app is the static build.
+
+1. **Database:** Vercel → your project → Storage → create a **Neon** (Postgres) database and connect it.
+   This sets `DATABASE_URL`. The table is created automatically on first use.
+2. **Environment variables** (Project → Settings → Environment Variables), then redeploy:
+   - `ADMIN_EMAIL`, `ADMIN_PASSWORD` — your admin login for `/admin`
+   - `SESSION_SECRET` — a long random string
+   - `GEMINI_API_KEY` — needed for voice notes and shelf photos
+3. Open `https://<your-site>/admin`, log in, and create vendors (or let shops sign up).
+
+Without `DATABASE_URL` the API still runs but stores data in `/tmp`, which Vercel wipes; the admin dashboard
+shows a warning. Without `GEMINI_API_KEY` shelf photos show a clear error instead of fake results.
+
+Locally: `cp .env.example .env`, fill in the values, `npm run dev`. Data goes to `./data/` (git-ignored)
+unless `DATABASE_URL` is set.

@@ -5,13 +5,15 @@ import { isValidUpiId } from '../../lib/reminders';
 
 interface ConsentModalProps {
   isOpen: boolean;
+  /** Only the no-login demo offers "demo data vs empty khata"; a real account keeps its own data. */
+  allowDemoChoice: boolean;
   profile: ShopProfile;
   onComplete: (profile: ShopProfile) => void;
   /** Clear the demo ledger so a real shop starts with an empty khata. */
   onStartEmpty: () => void;
 }
 
-export const ConsentModal: React.FC<ConsentModalProps> = ({ isOpen, profile, onComplete, onStartEmpty }) => {
+export const ConsentModal: React.FC<ConsentModalProps> = ({ isOpen, allowDemoChoice, profile, onComplete, onStartEmpty }) => {
   const [shopName, setShopName] = useState(profile.name);
   const [ownerName, setOwnerName] = useState(profile.owner);
   const [upiId, setUpiId] = useState(profile.upi_id);
@@ -33,11 +35,12 @@ export const ConsentModal: React.FC<ConsentModalProps> = ({ isOpen, profile, onC
       setUpiError(true);
       return;
     }
-    if (mode === 'empty') onStartEmpty();
+    const startEmpty = allowDemoChoice && mode === 'empty';
+    if (startEmpty) onStartEmpty();
     onComplete({
       ...profile,
-      id: mode === 'empty' ? `shop-${Date.now().toString(36)}` : profile.id,
-      created_at: mode === 'empty' ? new Date().toISOString() : profile.created_at,
+      id: startEmpty ? `shop-${Date.now().toString(36)}` : profile.id,
+      created_at: startEmpty ? new Date().toISOString() : profile.created_at,
       name: shopName.trim() || 'Hamari Dukaan',
       owner: ownerName.trim(),
       upi_id: upiId.trim(),
@@ -139,7 +142,8 @@ export const ConsentModal: React.FC<ConsentModalProps> = ({ isOpen, profile, onC
                 <ul className="text-[#5F7A6E] leading-relaxed list-disc pl-4 space-y-0.5">
                   <li>Grahak ka data sirf udhaar ka hisaab aur payment reminder ke liye hai.</li>
                   <li>Phone number sirf grahak ki sehmati se save hoga; sehmati ki tareekh likhi jayegi.</li>
-                  <li>Is prototype mein khata sirf isi browser mein rehta hai. Voice/photo samajhne ke liye awaaz, photo aur grahakon ke naam AI (Google Gemini) ko bheje jaate hain — phone number nahi.</li>
+                  <li>Login karne par khata server par save hota hai aur sirf aapko dikhta hai. Platform admin ko sirf totals dikhte hain, grahakon ke naam ya number nahi. Demo mein data sirf isi browser mein rehta hai.</li>
+                  <li>Voice/photo samajhne ke liye awaaz, photo aur grahakon ke naam AI (Google Gemini) ko bheje jaate hain — phone number nahi.</li>
                   <li>Kisi bhi grahak ka data export ya delete kar sakte hain (Khata → grahak).</li>
                 </ul>
               </div>
@@ -168,8 +172,8 @@ export const ConsentModal: React.FC<ConsentModalProps> = ({ isOpen, profile, onC
             )}
           </div>
 
-          {/* Start with demo data or an empty khata */}
-          <div className="grid grid-cols-2 gap-2 text-xs">
+          {/* Start with demo data or an empty khata (demo mode only) */}
+          <div className={`grid grid-cols-2 gap-2 text-xs ${allowDemoChoice ? '' : 'hidden'}`}>
             <button
               type="button"
               onClick={() => setMode('demo')}

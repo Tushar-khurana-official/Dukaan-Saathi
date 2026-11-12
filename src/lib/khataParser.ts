@@ -4,10 +4,10 @@
  *  - a cross-check on Gemini output (amounts and customer ids are re-derived deterministically),
  *  - measurable on the utterance set in eval/utterances.json (`npm run eval`).
  */
-import { extractAmount } from './hindiNumbers';
-import { matchCustomer, MatchableCustomer } from './customerMatch';
-import { normalizeText } from './textNormalize';
-import { rupeesToPaise } from './money';
+import { extractAmount } from './hindiNumbers.js';
+import { matchCustomer, MatchableCustomer } from './customerMatch.js';
+import { normalizeText } from './textNormalize.js';
+import { rupeesToPaise } from './money.js';
 
 export type KhataIntent =
   | 'add_credit'

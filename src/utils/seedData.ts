@@ -1,4 +1,4 @@
-import { Customer, Product, ShelfScan, ShopProfile, Transaction } from '../types';
+import { Customer, Product, ShelfScan, ShopProfile, Transaction } from '../types/index.js';
 
 export const DEMO_SHOP_ID = 'shop-demo';
 

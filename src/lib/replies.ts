@@ -3,7 +3,7 @@
  * question always states exactly what will be saved.
  */
 import type { ParsedKhata } from './khataParser';
-import { formatPaise } from './money';
+import { formatPaise } from './money.js';
 
 export type ReplyLanguage = 'hindi' | 'english' | 'hinglish';
 

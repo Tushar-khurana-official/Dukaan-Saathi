@@ -34,6 +34,7 @@ import { analyzeShelfImage } from '../../services/api';
 import { createDistributorOrderText, createWhatsAppUrl } from '../../utils/whatsapp';
 import type { ScanChange } from '../../lib/shelf';
 import { formatPaise } from '../../lib/money';
+import { preparePhoto } from '../../lib/image';
 
 const STATUS_LABEL: Record<StockStatus, string> = { ok: 'OK', low: 'KAM', out: 'KHATAM', unknown: '?' };
 
@@ -104,45 +105,52 @@ export const StockScreen: React.FC<StockScreenProps> = ({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const cameraInputRef = useRef<HTMLInputElement>(null);
 
+  const [scanError, setScanError] = useState<string | null>(null);
+
   const handleProcessImage = async (file: File) => {
-    const reader = new FileReader();
-    reader.onload = async () => {
-      const dataUrl = reader.result as string;
-      const base64 = dataUrl.split(',')[1];
+    setIsScanning(true);
+    setQualityWarning(null);
+    setScanError(null);
+    try {
+      const photo = await preparePhoto(file);
+      setCurrentScanImage(photo.upload);
+      // Clear the old result so a failed scan never looks like a new one.
+      setCurrentScanResults([]);
+      setScanNotes('');
+      setCurrentScanId(null);
 
-      setCurrentScanImage(dataUrl);
-      setIsScanning(true);
-      setQualityWarning(null);
+      const analysis = await analyzeShelfImage({
+        imageBase64: photo.upload.split(',')[1],
+        imageMimeType: 'image/jpeg',
+        catalog,
+        previousScanSummary: scans[0]?.overall_notes,
+      });
 
-      try {
-        const analysis = await analyzeShelfImage({
-          imageBase64: base64,
-          imageMimeType: file.type,
-          catalog,
-          previousScanSummary: scans[0]?.overall_notes,
-        });
-
-        setCurrentScanResults(analysis.products);
-        setScanNotes(analysis.overall_notes);
-        setQualityWarning(analysis.image_quality_warning || null);
-
-        // Save scan to history (statuses only, no counts)
-        if (analysis.products.length > 0) {
-          const saved = onAddScan({
-            image_ref: dataUrl,
-            overall_notes: analysis.overall_notes,
-            quality_warning: analysis.image_quality_warning ?? null,
-            detected_items: analysis.products,
-          });
-          setCurrentScanId(saved.id);
-        }
-      } catch (err) {
-        console.error('Scan failed:', err);
-      } finally {
-        setIsScanning(false);
+      if (analysis.error) {
+        setScanError(analysis.error);
+        return;
       }
-    };
-    reader.readAsDataURL(file);
+      setCurrentScanResults(analysis.products);
+      setScanNotes(analysis.overall_notes);
+      setQualityWarning(analysis.image_quality_warning || null);
+
+      // Save scan to history (statuses only, no counts; a small thumbnail, not the full photo)
+      if (analysis.products.length > 0) {
+        const saved = onAddScan({
+          image_ref: photo.thumbnail,
+          overall_notes: analysis.overall_notes,
+          quality_warning: analysis.image_quality_warning ?? null,
+          detected_items: analysis.products,
+        });
+        setCurrentScanId(saved.id);
+      } else {
+        setScanError('Photo mein koi catalog item pehchana nahi gaya. Shelf ke paas se, achhi roshni mein photo lein.');
+      }
+    } catch (err) {
+      setScanError(err instanceof Error ? err.message : 'Photo process nahi hui');
+    } finally {
+      setIsScanning(false);
+    }
   };
 
   // Group detected products
@@ -312,7 +320,11 @@ export const StockScreen: React.FC<StockScreenProps> = ({
               accept="image/*"
               capture="environment"
               className="hidden"
-              onChange={(e) => e.target.files?.[0] && handleProcessImage(e.target.files[0])}
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                e.target.value = '';
+                if (f) handleProcessImage(f);
+              }}
             />
 
             <button
@@ -327,7 +339,11 @@ export const StockScreen: React.FC<StockScreenProps> = ({
               ref={fileInputRef}
               accept="image/*"
               className="hidden"
-              onChange={(e) => e.target.files?.[0] && handleProcessImage(e.target.files[0])}
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                e.target.value = '';
+                if (f) handleProcessImage(f);
+              }}
             />
           </div>
 
@@ -338,6 +354,12 @@ export const StockScreen: React.FC<StockScreenProps> = ({
           </div>
 
           {/* Quality Warning if flagged by Gemini */}
+          {scanError && (
+            <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs font-bold flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 shrink-0" />
+              <p>{scanError}</p>
+            </div>
+          )}
           {qualityWarning && (
             <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-800 flex items-center gap-2">
               <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
