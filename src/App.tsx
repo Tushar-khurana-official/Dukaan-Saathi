@@ -18,6 +18,7 @@ import { useLedger } from './hooks/useLedger';
 import { useStock } from './hooks/useStock';
 import { Language } from './types';
 import { useShopSync } from './hooks/useShopSync';
+import { hasUnsynced } from './lib/storage';
 import type { PublicShop } from './services/account';
 
 interface AppProps {
@@ -83,6 +84,12 @@ export default function App({ mode, shop, onLogout }: AppProps) {
 
   const handleLogout = async () => {
     await sync.flush();
+    if (mode === 'shop' && hasUnsynced()) {
+      const ok = confirm(
+        'Kuch entries abhi server par nahi pahunchi (net nahi hai). Logout karne par woh is phone se mit jayengi. Phir bhi logout karein?',
+      );
+      if (!ok) return;
+    }
     onLogout();
   };
 
@@ -224,6 +231,7 @@ export default function App({ mode, shop, onLogout }: AppProps) {
               onAddCustomer={addCustomer}
               onUpdateCustomer={updateCustomer}
               onDeleteTransaction={deleteTransaction}
+              mode={mode}
               onRecordConsent={recordConsent}
               onWithdrawConsent={withdrawConsent}
               onDeleteCustomer={deleteCustomer}
@@ -261,6 +269,7 @@ export default function App({ mode, shop, onLogout }: AppProps) {
               customers={customers}
               customerBalances={customerBalances}
               reminders={reminders}
+              transactions={transactions}
               onUpdateProfile={setProfile}
               onLogReminderOpened={logReminderOpened}
               onOpenUpiQr={handleOpenUpiQr}

@@ -54,10 +54,14 @@ export const Header: React.FC<HeaderProps> = ({
                   className={`text-[10px] font-bold px-1.5 py-0.5 rounded flex items-center gap-1 flex-shrink-0 border ${
                     syncStatus === 'error'
                       ? 'bg-rose-500/20 text-rose-200 border-rose-400/40'
+                      : syncStatus === 'offline'
+                        ? 'bg-amber-400/20 text-amber-200 border-amber-300/40'
                       : 'bg-[#25D366]/20 text-[#25D366] border-[#25D366]/30'
                   }`}
                 >
-                  {syncStatus === 'saving' || syncStatus === 'pending' ? (
+                  {syncStatus === 'offline' ? (
+                    <CloudOff className="w-3 h-3" />
+                  ) : syncStatus === 'saving' || syncStatus === 'pending' ? (
                     <Loader2 className="w-3 h-3 animate-spin" />
                   ) : syncStatus === 'error' ? (
                     <CloudOff className="w-3 h-3" />
@@ -65,7 +69,13 @@ export const Header: React.FC<HeaderProps> = ({
                     <Cloud className="w-3 h-3" />
                   )}
                   <span className="hidden sm:inline">
-                    {syncStatus === 'error' ? 'Save nahi hua' : syncStatus === 'saved' ? 'Saved' : 'Saving'}
+                    {syncStatus === 'error'
+                      ? 'Save nahi hua'
+                      : syncStatus === 'offline'
+                        ? 'Offline • phone par saved'
+                        : syncStatus === 'saved'
+                          ? 'Saved'
+                          : 'Saving'}
                   </span>
                 </span>
               )}

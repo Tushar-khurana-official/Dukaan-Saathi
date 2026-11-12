@@ -67,3 +67,42 @@ export function createWhatsAppUrl(phone: string, text: string): string | null {
 export function createWhatsAppShareUrl(text: string): string {
   return `https://wa.me/?text=${encodeURIComponent(text)}`;
 }
+
+/**
+ * Receipt after a confirmed entry. Sent only to customers who agreed to receive receipts, and only
+ * when the owner taps send. Like reminders it carries no customer name or phone number: just the
+ * entry, the new balance, the shop name, and (if the owner shares it) the customer's statement link.
+ */
+export function buildReceiptMessage(params: {
+  type: 'credit' | 'payment';
+  amountPaise: number;
+  balancePaise: number;
+  shopName: string;
+  language: ReminderLanguage;
+  date?: Date;
+  statementUrl?: string | null;
+}): string {
+  const amount = formatPaise(params.amountPaise);
+  const balance = formatPaise(Math.max(0, params.balancePaise));
+  const date = (params.date ?? new Date()).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
+  const shop = params.shopName.trim();
+  const link = params.statementUrl;
+  if (params.language === 'hindi') {
+    const what = params.type === 'credit' ? `${amount} उधार लिखा गया` : `${amount} जमा हुए, धन्यवाद`;
+    return `🧾 ${shop}\n${date}: ${what}।\nकुल बाकी: ${balance}${link ? `\nपूरा खाता: ${link}` : ''}`;
+  }
+  if (params.language === 'english') {
+    const what = params.type === 'credit' ? `${amount} added to your credit` : `${amount} received, thank you`;
+    return `🧾 ${shop}\n${date}: ${what}.\nBalance due: ${balance}${link ? `\nFull statement: ${link}` : ''}`;
+  }
+  const what = params.type === 'credit' ? `${amount} udhaar likha gaya` : `${amount} jama hue, shukriya`;
+  return `🧾 ${shop}\n${date}: ${what}.\nKul baaki: ${balance}${link ? `\nPoora khata: ${link}` : ''}`;
+}
+
+/** Message that shares a customer's own statement link (with their consent). */
+export function buildStatementMessage(params: { shopName: string; url: string; language: ReminderLanguage }): string {
+  const shop = params.shopName.trim();
+  if (params.language === 'hindi') return `नमस्ते जी 🙏 ${shop} में आपका पूरा खाता (सभी एंट्री और बाकी) यहाँ देखें: ${params.url}`;
+  if (params.language === 'english') return `Hello 🙏 See your full account at ${shop} (all entries and balance): ${params.url}`;
+  return `Namaste ji 🙏 ${shop} mein aapka poora khata (saari entries aur baaki) yahan dekhein: ${params.url}`;
+}

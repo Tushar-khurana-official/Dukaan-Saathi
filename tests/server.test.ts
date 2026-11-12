@@ -143,3 +143,31 @@ test('AI endpoints need a login; shelf photo without an AI key returns an error,
   assert.equal(shelf.status, 503);
   assert.equal(shelf.json.products, undefined);
 });
+
+test('statement link: shows one customer their entries and balance, no phone; wrong or removed key -> 404', async () => {
+  const { makeStatementToken } = await import('../src/lib/statement');
+  const v = await call('POST', '/api/auth/signup', { email: 'v4@example.test', password: 'vendor-pass-4', shopName: 'Shop Four', ownerName: 'D' });
+  const shopId = v.json.shop.id;
+  const key = 'a'.repeat(36);
+  const customers = initialCustomers.map((c) => (c.id === 'c-1' ? { ...c, statement_key: key } : c));
+  const data = { profile: { ...initialShopProfile, name: 'Shop Four' }, customers, transactions: initialTransactions, reminders: [], catalog: [], scans: [], reorder: [] };
+  assert.equal((await call('PUT', '/api/shop/data', { data }, v.cookie)).status, 200);
+
+  const ok = await call('GET', `/api/statement/${makeStatementToken(shopId, 'c-1', key)}`);
+  assert.equal(ok.status, 200);
+  assert.equal(ok.json.customer.name, initialCustomers[0].name);
+  assert.equal(ok.json.shop.name, 'Shop Four');
+  assert.ok(ok.json.entries.length > 0);
+  const text = JSON.stringify(ok.json);
+  for (const c of initialCustomers) {
+    if (c.phone) assert.ok(!text.includes(c.phone), 'phone leaked');
+    if (c.id !== 'c-1') assert.ok(!text.includes(c.name), `other customer leaked: ${c.name}`);
+  }
+
+  assert.equal((await call('GET', `/api/statement/${makeStatementToken(shopId, 'c-1', 'b'.repeat(36))}`)).status, 404);
+  assert.equal((await call('GET', `/api/statement/${makeStatementToken(shopId, 'c-2', key)}`)).status, 404); // no link for c-2
+  // turning the link off
+  const off = { ...data, customers: customers.map((c) => ({ ...c, statement_key: null })) };
+  await call('PUT', '/api/shop/data', { data: off }, v.cookie);
+  assert.equal((await call('GET', `/api/statement/${makeStatementToken(shopId, 'c-1', key)}`)).status, 404);
+});

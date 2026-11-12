@@ -93,6 +93,9 @@ export function migrateV1(raw: {
     note: c.note ?? '',
     created_at: c.created_at ?? now,
     avatar_color: c.avatar_color,
+    receipts_opt_in: Boolean(c.consent_given_at && c.receipts_opt_in),
+    statement_key: typeof c.statement_key === 'string' ? c.statement_key : null,
+    credit_limit_paise: Number.isInteger(c.credit_limit_paise) ? c.credit_limit_paise : null,
   }));
 
   const transactions: Transaction[] = (raw.transactions ?? []).map((t) => ({
@@ -179,6 +182,27 @@ export function runStorageMigration(): void {
 
 /** Which account the browser cache belongs to ("demo" or a shop id). */
 export const OWNER_KEY = 'dukaan_saathi_owner';
+/** Set while local changes have not reached the server yet (offline queue). */
+export const UNSYNCED_KEY = 'dukaan_saathi_unsynced';
+/** The logged-in shop's account details, so the app can open offline. */
+export const LAST_SHOP_KEY = 'dukaan_saathi_last_shop';
+
+export function markUnsynced(on: boolean) {
+  try {
+    if (on) localStorage.setItem(UNSYNCED_KEY, new Date().toISOString());
+    else localStorage.removeItem(UNSYNCED_KEY);
+  } catch {
+    // ignore
+  }
+}
+
+export function hasUnsynced(): boolean {
+  try {
+    return Boolean(localStorage.getItem(UNSYNCED_KEY));
+  } catch {
+    return false;
+  }
+}
 
 export interface LocalShopData {
   profile: ShopProfile;
@@ -211,6 +235,8 @@ export function clearLocalData() {
   try {
     Object.values(KEYS).forEach((k) => localStorage.removeItem(k));
     localStorage.removeItem(OWNER_KEY);
+    localStorage.removeItem(UNSYNCED_KEY);
+    localStorage.removeItem(LAST_SHOP_KEY);
   } catch {
     // ignore
   }

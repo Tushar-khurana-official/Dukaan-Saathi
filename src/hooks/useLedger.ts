@@ -131,7 +131,8 @@ export function useLedger() {
     [profile.id],
   );
 
-  const updateCustomer = useCallback((id: string, updates: Partial<Pick<Customer, 'name' | 'note'>>) => {
+  const updateCustomer = useCallback(
+    (id: string, updates: Partial<Pick<Customer, 'name' | 'note' | 'receipts_opt_in' | 'statement_key' | 'credit_limit_paise'>>) => {
     setCustomers((prev) => prev.map((c) => (c.id === id ? { ...c, ...updates } : c)));
   }, []);
 
@@ -145,7 +146,9 @@ export function useLedger() {
 
   /** Customer withdrew consent: remove the phone number, keep the udhaar record. */
   const withdrawConsent = useCallback((id: string) => {
-    setCustomers((prev) => prev.map((c) => (c.id === id ? { ...c, phone: '', consent_given_at: null } : c)));
+    setCustomers((prev) =>
+      prev.map((c) => (c.id === id ? { ...c, phone: '', consent_given_at: null, receipts_opt_in: false } : c)),
+    );
   }, []);
 
   /** DPDP erasure request: removes the customer, their transactions and their reminder history. */

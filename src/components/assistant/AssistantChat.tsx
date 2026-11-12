@@ -34,6 +34,8 @@ import { translations } from '../../utils/translations';
 import { parseKhataMessage, analyzeShelfImage } from '../../services/api';
 import { preparePhoto } from '../../lib/image';
 import { useAudioRecorder } from '../../hooks/useAudioRecorder';
+import { buildReceiptMessage, createWhatsAppUrl } from '../../lib/reminders';
+import { statementUrl } from '../../lib/statement';
 import { useChatHistory } from '../../hooks/useChatHistory';
 import { formatRelativeDate } from '../../utils/formatters';
 
@@ -75,6 +77,7 @@ function draftFromParsed(p: AiParsedKhata): Draft {
 }
 
 export const AssistantChat: React.FC<AssistantChatProps> = ({
+  profile,
   language,
   customers,
   customerBalances,
@@ -304,6 +307,7 @@ export const AssistantChat: React.FC<AssistantChatProps> = ({
       const after = d.type === 'credit' ? before + amount_paise : before - amount_paise;
       pushBot(
         `✅ ${name} ke khate mein ${formatPaise(amount_paise)} ${d.type === 'credit' ? 'udhaar likh diya' : 'jama ho gaya'}. Naya baaki: ${formatPaise(after)}.`,
+        customerId ? { receipt: { customerId, type: d.type, amountPaise: amount_paise, balancePaise: after } } : {},
       );
     }
   };
@@ -617,6 +621,16 @@ export const AssistantChat: React.FC<AssistantChatProps> = ({
                             </div>
                           )}
                         </div>
+                        {(() => {
+                          const cust = draft.type === 'credit' ? customers.find((c) => c.id === draft.customerId) : undefined;
+                          const amt = parseRupeeInput(draft.amountInput) ?? 0;
+                          const bal = cust ? customerBalances.get(cust.id)?.balance ?? 0 : 0;
+                          return cust?.credit_limit_paise && amt > 0 && bal + amt > cust.credit_limit_paise ? (
+                            <p className="text-[11px] font-bold text-amber-800 mb-2">
+                              ⚠️ Iske baad baaki {formatPaise(bal + amt)} hoga — aapki seema {formatPaise(cust.credit_limit_paise)} se zyada.
+                            </p>
+                          ) : null;
+                        })()}
                         {problem && (
                           <p className="flex items-center gap-1 text-[11px] font-bold text-amber-800 mb-2">
                             <AlertTriangle className="w-3.5 h-3.5" /> {problem} — "Badlo" dabayein
@@ -656,6 +670,32 @@ export const AssistantChat: React.FC<AssistantChatProps> = ({
                     <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" /> Khate mein save ho gaya
                   </div>
                 )}
+                {msg.receipt && (() => {
+                  const r = msg.receipt;
+                  const cust = customers.find((c) => c.id === r.customerId);
+                  if (!cust?.receipts_opt_in || !cust.phone || !cust.consent_given_at) return null;
+                  return (
+                    <button
+                      disabled={r.sent}
+                      onClick={() => {
+                        const text = buildReceiptMessage({
+                          type: r.type,
+                          amountPaise: r.amountPaise,
+                          balancePaise: r.balancePaise,
+                          shopName: profile.name,
+                          language: profile.reminder_settings.language,
+                          statementUrl: cust.statement_key ? statementUrl(window.location.origin, profile.id, cust.id, cust.statement_key) : null,
+                        });
+                        const url = createWhatsAppUrl(cust.phone, text);
+                        if (url) window.open(url, '_blank', 'noopener');
+                        setMessages((prev) => prev.map((m) => (m.id === msg.id && m.receipt ? { ...m, receipt: { ...m.receipt, sent: true } } : m)));
+                      }}
+                      className="mt-2 px-3 py-1.5 rounded-lg bg-[#25D366] text-[#0B3D2E] text-[11px] font-bold disabled:opacity-50"
+                    >
+                      {r.sent ? 'Receipt WhatsApp mein khola ✓' : '🧾 Receipt bhejein (WhatsApp)'}
+                    </button>
+                  );
+                })()}
                 {msg.cancelled && (
                   <div className="mt-2 text-[10px] font-bold text-gray-500 bg-gray-100 px-2.5 py-1 rounded-lg inline-flex items-center gap-1">
                     <X className="w-3.5 h-3.5" /> Cancel kiya — kuch save nahi hua

@@ -38,6 +38,12 @@ export interface Customer {
   note: string;
   created_at: string;
   avatar_color?: string;
+  /** Customer agreed to get a WhatsApp receipt after each entry (owner still taps send). */
+  receipts_opt_in?: boolean;
+  /** Secret part of the customer's statement link; null/absent = link off. */
+  statement_key?: string | null;
+  /** Owner's own credit limit for this customer (the app only suggests one). */
+  credit_limit_paise?: number | null;
 }
 
 export type TransactionType = 'credit' | 'payment' | 'sale';
@@ -139,5 +145,7 @@ export interface ChatMessage {
   entrySource?: 'voice' | 'text';
   confirmed?: boolean;
   cancelled?: boolean;
+  /** Bot confirmation of a saved entry: lets the owner send a WhatsApp receipt (opted-in customers only). */
+  receipt?: { customerId: string; type: 'credit' | 'payment'; amountPaise: number; balancePaise: number; sent?: boolean };
   status?: 'sending' | 'sent' | 'delivered' | 'read';
 }

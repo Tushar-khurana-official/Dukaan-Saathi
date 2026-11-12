@@ -22,6 +22,8 @@ import {
   verifyPassword,
 } from './auth.js';
 import { computeShopStats, validateShopData } from './stats.js';
+import { parseStatementToken } from '../lib/statement.js';
+import { computeBalances } from '../lib/ledger.js';
 import { getStore } from './store.js';
 import { publicShop, ShopData, ShopPlan, ShopRecord, ShopStats } from './types.js';
 
@@ -185,6 +187,45 @@ export function registerAccountRoutes(app: Express) {
     if (pw) return res.status(400).json({ error: pw });
     await store.updateShop(shop.id, { password_hash: hashPassword(req.body.next), updated_at: new Date().toISOString() });
     return res.json({ ok: true });
+  });
+
+  /* ------------------------ customer statement link ------------------------ */
+
+  // Public, read-only: one customer sees their own entries and balance. No login, no phone numbers.
+  const statementHits = new Map<string, { n: number; until: number }>();
+  app.get('/api/statement/:token', async (req: Request, res: Response) => {
+    const now = Date.now();
+    const hit = statementHits.get(req.ip ?? '');
+    if (hit && hit.until > now && ++hit.n > 120) return res.status(429).json({ error: 'Thodi der baad dekhein' });
+    if (!hit || hit.until <= now) statementHits.set(req.ip ?? '', { n: 1, until: now + 15 * 60_000 });
+
+    const parsed = parseStatementToken(req.params.token);
+    const notFound = () => res.status(404).json({ error: 'Yeh link band hai ya galat hai. Dukaan se naya link maangein.' });
+    if (!parsed) return notFound();
+    const store = await getStore();
+    const shop = await store.getShop(parsed.shopId);
+    if (!shop || shop.status === 'suspended') return notFound();
+    const data = await store.getData(shop.id);
+    const customer = data?.customers.find((c) => c.id === parsed.customerId);
+    const key = customer?.statement_key;
+    if (!data || !customer || !key || key.length !== parsed.key.length ||
+        !crypto.timingSafeEqual(Buffer.from(key), Buffer.from(parsed.key))) {
+      return notFound();
+    }
+    const txs = data.transactions
+      .filter((t) => t.customer_id === customer.id && t.type !== 'sale')
+      .sort((a, b) => b.confirmed_at.localeCompare(a.confirmed_at));
+    const balance = computeBalances(txs, [customer.id]).get(customer.id)?.balance ?? 0;
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('X-Robots-Tag', 'noindex');
+    return res.json({
+      shop: { name: shop.name, upi_id: data.profile.upi_id || shop.upi_id },
+      customer: { name: customer.name },
+      balance_paise: balance,
+      entries: txs.slice(0, 300).map((t) => ({ type: t.type, amount_paise: t.amount_paise, note: t.note, date: t.confirmed_at })),
+      total_entries: txs.length,
+      generated_at: new Date().toISOString(),
+    });
   });
 
   /* -------------------------------- admin -------------------------------- */
