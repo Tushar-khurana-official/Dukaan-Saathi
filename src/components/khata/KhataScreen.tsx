@@ -38,6 +38,7 @@ interface KhataScreenProps {
   onAddTransaction: (tx: NewTransaction) => Transaction;
   onAddCustomer: (cust: NewCustomer) => Customer;
   onUpdateCustomer: (id: string, updates: Partial<Pick<Customer, 'name' | 'note'>>) => void;
+  onDeleteTransaction: (id: string) => void;
   onRecordConsent: (id: string, phone: string) => void;
   onWithdrawConsent: (id: string) => void;
   onDeleteCustomer: (id: string) => void;
@@ -59,6 +60,7 @@ export const KhataScreen: React.FC<KhataScreenProps> = ({
   onAddTransaction,
   onAddCustomer,
   onUpdateCustomer,
+  onDeleteTransaction,
   onRecordConsent,
   onWithdrawConsent,
   onDeleteCustomer,
@@ -647,14 +649,24 @@ export const KhataScreen: React.FC<KhataScreenProps> = ({
                           </div>
                         </div>
 
-                        <span
-                          className={`font-black text-sm ${
-                            isCredit ? 'text-rose-600' : 'text-emerald-700'
-                          }`}
-                        >
-                          {isCredit ? '+' : '-'}
-                          {formatPaise(tx.amount_paise)}
-                        </span>
+                        <div className="flex items-center gap-1.5">
+                          <span className={`font-black text-sm ${isCredit ? 'text-rose-600' : 'text-emerald-700'}`}>
+                            {isCredit ? '+' : '-'}
+                            {formatPaise(tx.amount_paise)}
+                          </span>
+                          <button
+                            onClick={() => {
+                              if (confirm(`Yeh entry (${isCredit ? 'udhaar' : 'jama'} ${formatPaise(tx.amount_paise)}) galat hai? Delete karein — baaki rashi apne-aap theek ho jayegi.`)) {
+                                onDeleteTransaction(tx.id);
+                              }
+                            }}
+                            className="p-1 rounded-lg text-gray-300 hover:text-rose-600 hover:bg-rose-50"
+                            title="Galat entry delete karein"
+                            aria-label="Entry delete karein"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
                       </div>
                     );
                   })}

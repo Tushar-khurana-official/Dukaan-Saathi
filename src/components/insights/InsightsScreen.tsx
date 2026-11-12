@@ -250,9 +250,11 @@ export const InsightsScreen: React.FC<InsightsScreenProps> = ({
         {/* AI Recommendations Grid */}
         {festivalData && (
           <div className="space-y-3">
-            <div className="p-3 bg-amber-50 rounded-xl border border-amber-200 text-xs text-amber-900 font-medium">
-              {festivalData.summary}
-            </div>
+            {festivalData.summary && (
+              <div className="p-3 bg-amber-50 rounded-xl border border-amber-200 text-xs text-amber-900 font-medium">
+                {festivalData.summary}
+              </div>
+            )}
 
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
               {festivalData.items?.map((item: any, idx: number) => (

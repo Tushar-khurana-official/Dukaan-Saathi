@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { parseKhataText } from '../src/lib/khataParser';
 import { initialCustomers } from '../src/utils/seedData';
 import { runEval } from '../scripts/eval-parser';
+import { goodEnoughLocally } from '../src/services/api';
 
 test('acceptance: "Sharma ji ko 500 udhaar" -> 500 credit for Sharma ji (in paise)', () => {
   const p = parseKhataText('Sharma ji ko 500 udhaar', initialCustomers);
@@ -43,4 +44,19 @@ test('eval set: 50 utterances, at least 90% fully correct', () => {
   const { summary } = runEval();
   assert.equal(summary.total, 50);
   assert.ok(summary.exact >= 90, `exact accuracy ${summary.exact}% < 90%`);
+});
+
+test('two customers with the same name: ask which one, but the entry itself is clear (no AI needed)', () => {
+  const customers = [
+    { id: 'a', name: 'paras' },
+    { id: 'b', name: 'paras' },
+  ];
+  const p = parseKhataText('पारस के 20 उधर', customers);
+  assert.equal(p.intent, 'add_credit');
+  assert.equal(p.amount_paise, 2000);
+  assert.equal(p.matched_customer_id, null);
+  assert.deepEqual([...p.candidate_customer_ids].sort(), ['a', 'b']);
+  assert.equal(goodEnoughLocally(p), true);
+  assert.equal(goodEnoughLocally(parseKhataText('kuch samajh nahi aaya', customers)), false);
+  assert.equal(goodEnoughLocally(parseKhataText('paras ko udhaar likho', customers)), false); // amount missing
 });

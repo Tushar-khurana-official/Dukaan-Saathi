@@ -45,6 +45,7 @@ export default function App({ mode, shop, onLogout }: AppProps) {
     addTransaction,
     undoLastTransaction,
     clearUndo,
+    deleteTransaction,
     addCustomer,
     updateCustomer,
     recordConsent,
@@ -222,6 +223,7 @@ export default function App({ mode, shop, onLogout }: AppProps) {
               onAddTransaction={addTransaction}
               onAddCustomer={addCustomer}
               onUpdateCustomer={updateCustomer}
+              onDeleteTransaction={deleteTransaction}
               onRecordConsent={recordConsent}
               onWithdrawConsent={withdrawConsent}
               onDeleteCustomer={deleteCustomer}

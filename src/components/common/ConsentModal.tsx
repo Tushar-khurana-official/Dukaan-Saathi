@@ -52,23 +52,17 @@ export const ConsentModal: React.FC<ConsentModalProps> = ({ isOpen, allowDemoCho
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm animate-in fade-in">
-      <div className="bg-white w-full max-w-md rounded-3xl shadow-2xl overflow-hidden border border-emerald-100 flex flex-col">
-        {/* Header Splash */}
-        <div className="bg-gradient-to-br from-[#0B3D2E] to-[#1F7A5C] text-white p-6 text-center relative overflow-hidden">
-          <div className="w-16 h-16 rounded-2xl bg-[#25D366] text-[#0B3D2E] mx-auto flex items-center justify-center shadow-lg mb-3">
-            <Store className="w-8 h-8" />
-          </div>
-          <h2 className="text-2xl font-black tracking-tight">Dukaan Saathi</h2>
-          <p className="text-xs text-[#25D366] font-bold mt-1 tracking-wider uppercase">
-            Bolo. Photo kheencho. Paisa wapas pao.
-          </p>
-          <p className="text-xs text-emerald-200 mt-2 max-w-xs mx-auto">
-            Aapka digital WhatsApp-style kirana saathi. Notebook chhodhein, voice aur AI apnayein.
-          </p>
+      <div className="bg-white w-full max-w-md rounded-3xl shadow-2xl overflow-y-auto max-h-[calc(100dvh-2rem)] border border-emerald-100 flex flex-col">
+        {/* Header */}
+        <div className="bg-gradient-to-br from-[#0B3D2E] to-[#1F7A5C] text-white px-6 py-4 text-center shrink-0">
+          <h2 className="text-xl font-black tracking-tight flex items-center justify-center gap-2">
+            <Store className="w-5 h-5 text-[#25D366]" /> Dukaan Saathi
+          </h2>
+          <p className="text-[11px] text-[#25D366] font-bold mt-0.5 tracking-wider uppercase">Bolo. Photo kheencho. Paisa wapas pao.</p>
         </div>
 
         {/* Content Form */}
-        <form onSubmit={handleSubmit} className="p-6 space-y-4">
+        <form onSubmit={handleSubmit} className="p-5 space-y-3">
           <div>
             <label className="block text-xs font-bold text-[#123D31] mb-1">
               Dukaan Ka Naam (Shop Name)
@@ -138,14 +132,18 @@ export const ConsentModal: React.FC<ConsentModalProps> = ({ isOpen, allowDemoCho
             <div className="flex items-start gap-2.5">
               <ShieldCheck className="w-5 h-5 text-[#1F7A5C] shrink-0 mt-0.5" />
               <div className="text-xs text-[#123D31]">
-                <p className="font-bold mb-0.5">Data ka upyog (DPDP notice)</p>
-                <ul className="text-[#5F7A6E] leading-relaxed list-disc pl-4 space-y-0.5">
-                  <li>Grahak ka data sirf udhaar ka hisaab aur payment reminder ke liye hai.</li>
-                  <li>Phone number sirf grahak ki sehmati se save hoga; sehmati ki tareekh likhi jayegi.</li>
-                  <li>Login karne par khata server par save hota hai aur sirf aapko dikhta hai. Platform admin ko sirf totals dikhte hain, grahakon ke naam ya number nahi. Demo mein data sirf isi browser mein rehta hai.</li>
-                  <li>Voice/photo samajhne ke liye awaaz, photo aur grahakon ke naam AI (Google Gemini) ko bheje jaate hain — phone number nahi.</li>
-                  <li>Kisi bhi grahak ka data export ya delete kar sakte hain (Khata → grahak).</li>
-                </ul>
+                <p className="font-bold mb-0.5">Data ka upyog</p>
+                <p className="text-[#5F7A6E] leading-relaxed">
+                  Grahak ka data sirf udhaar ke hisaab aur payment reminder ke liye. Phone number sirf grahak ki sehmati se.
+                </p>
+                <details className="mt-1 text-[#5F7A6E]">
+                  <summary className="cursor-pointer font-bold text-[#1F7A5C]">Poori jaankari</summary>
+                  <ul className="leading-relaxed list-disc pl-4 space-y-0.5 mt-1">
+                    <li>Login karne par khata server par save hota hai aur sirf aapko dikhta hai. Admin ko sirf totals dikhte hain.</li>
+                    <li>Voice/photo samajhne ke liye awaaz, photo aur grahakon ke naam AI (Google Gemini) ko jaate hain — phone number nahi.</li>
+                    <li>Kisi bhi grahak ka data export ya delete kar sakte hain (Khata → grahak).</li>
+                  </ul>
+                </details>
               </div>
             </div>
 
