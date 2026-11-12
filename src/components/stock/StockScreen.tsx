@@ -32,6 +32,11 @@ import {
 import { translations } from '../../utils/translations';
 import { analyzeShelfImage } from '../../services/api';
 import { createDistributorOrderText, createWhatsAppUrl } from '../../utils/whatsapp';
+import type { ScanChange } from '../../lib/shelf';
+import { formatPaise } from '../../lib/money';
+import { preparePhoto } from '../../lib/image';
+
+const STATUS_LABEL: Record<StockStatus, string> = { ok: 'OK', low: 'KAM', out: 'KHATAM', unknown: '?' };
 
 interface StockScreenProps {
   profile: ShopProfile;
@@ -39,10 +44,11 @@ interface StockScreenProps {
   catalog: Product[];
   scans: ShelfScan[];
   reorderList: ReorderItem[];
-  compareWithPreviousScan: (prodName: string, status: string) => { label: string; changed: boolean } | null;
-  onAddScan: (scan: Omit<ShelfScan, 'id' | 'created_at'>) => ShelfScan;
+  latestChanges: ScanChange[];
+  compareWithPreviousScan: (scanId: string, prodName: string, sku: string | null) => ScanChange | null;
+  onAddScan: (scan: Pick<ShelfScan, 'image_ref' | 'overall_notes' | 'quality_warning' | 'detected_items'>) => ShelfScan;
   onUpdateProduct: (id: string, partial: Partial<Product>) => void;
-  onAddProduct: (prod: Omit<Product, 'id'>) => Product;
+  onAddProduct: (prod: Omit<Product, 'id' | 'shop_id'>) => Product;
   onAddToReorder: (item: ReorderItem) => void;
   onUpdateReorderQty: (prodId: string, qty: number) => void;
   onRemoveFromReorder: (prodId: string) => void;
@@ -57,6 +63,7 @@ export const StockScreen: React.FC<StockScreenProps> = ({
   catalog,
   scans,
   reorderList,
+  latestChanges,
   compareWithPreviousScan,
   onAddScan,
   onUpdateProduct,
@@ -73,10 +80,10 @@ export const StockScreen: React.FC<StockScreenProps> = ({
   const [activeTab, setActiveTab] = useState<'scan' | 'reorder' | 'catalog' | 'history'>('scan');
   const [isScanning, setIsScanning] = useState(false);
   const [currentScanImage, setCurrentScanImage] = useState<string | null>(
-    scans.length > 0 ? scans[0].image_thumbnail : null
+    scans.length > 0 ? scans[0].image_ref : null
   );
   const [currentScanResults, setCurrentScanResults] = useState<DetectedProduct[]>(
-    scans.length > 0 ? scans[0].results : []
+    scans.length > 0 ? scans[0].detected_items : []
   );
   const [scanNotes, setScanNotes] = useState<string>(
     scans.length > 0 ? scans[0].overall_notes : ''
@@ -88,50 +95,62 @@ export const StockScreen: React.FC<StockScreenProps> = ({
   const [isAddSkuOpen, setIsAddSkuOpen] = useState(false);
   const [newSkuName, setNewSkuName] = useState('');
   const [newSkuCategory, setNewSkuCategory] = useState('Groceries');
+  const [currentScanId, setCurrentScanId] = useState<string | null>(scans[0]?.id ?? null);
   const [newSkuMin, setNewSkuMin] = useState(10);
+  const [newSkuAliases, setNewSkuAliases] = useState('');
   const [newSkuUnit, setNewSkuUnit] = useState('pkts');
   const [newSkuSupplier, setNewSkuSupplier] = useState('Local Agency');
-  const [newSkuPhone, setNewSkuPhone] = useState('9811000000');
+  const [newSkuPhone, setNewSkuPhone] = useState('');
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const cameraInputRef = useRef<HTMLInputElement>(null);
 
+  const [scanError, setScanError] = useState<string | null>(null);
+
   const handleProcessImage = async (file: File) => {
-    const reader = new FileReader();
-    reader.onload = async () => {
-      const dataUrl = reader.result as string;
-      const base64 = dataUrl.split(',')[1];
+    setIsScanning(true);
+    setQualityWarning(null);
+    setScanError(null);
+    try {
+      const photo = await preparePhoto(file);
+      setCurrentScanImage(photo.upload);
+      // Clear the old result so a failed scan never looks like a new one.
+      setCurrentScanResults([]);
+      setScanNotes('');
+      setCurrentScanId(null);
 
-      setCurrentScanImage(dataUrl);
-      setIsScanning(true);
-      setQualityWarning(null);
+      const analysis = await analyzeShelfImage({
+        imageBase64: photo.upload.split(',')[1],
+        imageMimeType: 'image/jpeg',
+        catalog,
+        previousScanSummary: scans[0]?.overall_notes,
+      });
 
-      try {
-        const analysis = await analyzeShelfImage({
-          imageBase64: base64,
-          imageMimeType: file.type,
-          catalog,
-          previousScanSummary: scans[0]?.overall_notes,
-        });
-
-        setCurrentScanResults(analysis.products);
-        setScanNotes(analysis.overall_notes);
-        setQualityWarning(analysis.image_quality_warning || null);
-
-        // Save scan
-        onAddScan({
-          image_thumbnail: dataUrl,
-          overall_notes: analysis.overall_notes,
-          quality_warning: analysis.image_quality_warning,
-          results: analysis.products,
-        });
-      } catch (err) {
-        console.error('Scan failed:', err);
-      } finally {
-        setIsScanning(false);
+      if (analysis.error) {
+        setScanError(analysis.error);
+        return;
       }
-    };
-    reader.readAsDataURL(file);
+      setCurrentScanResults(analysis.products);
+      setScanNotes(analysis.overall_notes);
+      setQualityWarning(analysis.image_quality_warning || null);
+
+      // Save scan to history (statuses only, no counts; a small thumbnail, not the full photo)
+      if (analysis.products.length > 0) {
+        const saved = onAddScan({
+          image_ref: photo.thumbnail,
+          overall_notes: analysis.overall_notes,
+          quality_warning: analysis.image_quality_warning ?? null,
+          detected_items: analysis.products,
+        });
+        setCurrentScanId(saved.id);
+      } else {
+        setScanError('Photo mein koi catalog item pehchana nahi gaya. Shelf ke paas se, achhi roshni mein photo lein.');
+      }
+    } catch (err) {
+      setScanError(err instanceof Error ? err.message : 'Photo process nahi hui');
+    } finally {
+      setIsScanning(false);
+    }
   };
 
   // Group detected products
@@ -144,22 +163,33 @@ export const StockScreen: React.FC<StockScreenProps> = ({
 
   // Add detected low/out item to reorder list
   const handleAddDetectedToReorder = (item: DetectedProduct) => {
-    const matched = catalog.find((c) => c.id === item.matched_sku) || catalog[0];
-    onAddToReorder({
-      product_id: matched.id,
-      product_name: item.name,
-      quantity: Math.max(10, matched.min_level * 2),
-      unit: matched.unit || 'pkts',
-      supplier_name: matched.supplier_name || 'Distributor',
-      supplier_phone: matched.supplier_phone || '9811234567',
-    });
+    const matched = catalog.find((c) => c.id === item.matched_sku);
+    onAddToReorder(
+      matched
+        ? {
+            product_id: matched.id,
+            product_name: matched.name,
+            quantity: Math.max(1, matched.low_stock_threshold),
+            unit: matched.unit,
+            supplier_name: matched.supplier_name || 'Distributor',
+            supplier_phone: matched.supplier_phone,
+          }
+        : {
+            product_id: `adhoc-${item.name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`,
+            product_name: item.name,
+            quantity: 1,
+            unit: 'pack',
+            supplier_name: 'Distributor (set karein)',
+            supplier_phone: '',
+          },
+    );
   };
 
   // WhatsApp distributor order
   const handleSendWhatsAppOrder = (supplierPhone: string, supplierName: string, items: ReorderItem[]) => {
     const message = createDistributorOrderText(supplierName, profile.name, items);
     const url = createWhatsAppUrl(supplierPhone, message);
-    window.open(url, '_blank');
+    if (url) window.open(url, '_blank', 'noopener');
   };
 
   // Download CSV
@@ -181,14 +211,16 @@ export const StockScreen: React.FC<StockScreenProps> = ({
     onAddProduct({
       name: newSkuName.trim(),
       category: newSkuCategory,
-      min_level: Number(newSkuMin) || 5,
-      current_level: Number(newSkuMin) || 5,
+      low_stock_threshold: Number(newSkuMin) || 5,
+      stock_status: 'unknown',
+      aliases: newSkuAliases.split(',').map((a) => a.trim().toLowerCase()).filter(Boolean),
       unit: newSkuUnit,
       supplier_name: newSkuSupplier,
       supplier_phone: newSkuPhone,
     });
 
     setNewSkuName('');
+    setNewSkuAliases('');
     setIsAddSkuOpen(false);
   };
 
@@ -201,6 +233,25 @@ export const StockScreen: React.FC<StockScreenProps> = ({
           <span className="font-bold">⚠️ {t.disclaimer}</span>
         </p>
       </div>
+
+      {/* What changed since the previous photo */}
+      {latestChanges.some((c) => c.trend === 'worse' || c.trend === 'better') && (
+        <div className="p-3.5 rounded-2xl bg-white border border-emerald-100 text-xs shadow-xs">
+          <p className="font-extrabold text-[#0B3D2E] mb-1.5">Pichli photo se badlav</p>
+          <ul className="space-y-1">
+            {latestChanges
+              .filter((c) => c.trend === 'worse' || c.trend === 'better')
+              .map((c) => (
+                <li key={c.name} className="flex items-center justify-between gap-2">
+                  <span className="font-semibold text-[#123D31]">{c.name}</span>
+                  <span className={`font-bold ${c.trend === 'worse' ? 'text-rose-600' : 'text-emerald-700'}`}>
+                    {c.previous ? STATUS_LABEL[c.previous] : '?'} → {STATUS_LABEL[c.current]}
+                  </span>
+                </li>
+              ))}
+          </ul>
+        </div>
+      )}
 
       {/* Navigation Sub-Tabs */}
       <div className="flex items-center gap-2 border-b border-emerald-100 pb-2 overflow-x-auto text-xs font-bold">
@@ -269,7 +320,11 @@ export const StockScreen: React.FC<StockScreenProps> = ({
               accept="image/*"
               capture="environment"
               className="hidden"
-              onChange={(e) => e.target.files?.[0] && handleProcessImage(e.target.files[0])}
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                e.target.value = '';
+                if (f) handleProcessImage(f);
+              }}
             />
 
             <button
@@ -284,7 +339,11 @@ export const StockScreen: React.FC<StockScreenProps> = ({
               ref={fileInputRef}
               accept="image/*"
               className="hidden"
-              onChange={(e) => e.target.files?.[0] && handleProcessImage(e.target.files[0])}
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                e.target.value = '';
+                if (f) handleProcessImage(f);
+              }}
             />
           </div>
 
@@ -295,6 +354,12 @@ export const StockScreen: React.FC<StockScreenProps> = ({
           </div>
 
           {/* Quality Warning if flagged by Gemini */}
+          {scanError && (
+            <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs font-bold flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 shrink-0" />
+              <p>{scanError}</p>
+            </div>
+          )}
           {qualityWarning && (
             <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-800 flex items-center gap-2">
               <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
@@ -379,7 +444,10 @@ export const StockScreen: React.FC<StockScreenProps> = ({
                 </div>
                 <div className="space-y-2">
                   {grouped.out.map((item, idx) => {
-                    const comparison = compareWithPreviousScan(item.name, item.status);
+                    const change = currentScanId ? compareWithPreviousScan(currentScanId, item.name, item.matched_sku) : null;
+                    const comparison = change && change.previous
+                      ? { label: change.trend === 'same' ? `Pichli photo jaisa (${STATUS_LABEL[change.current]})` : `Pehle ${STATUS_LABEL[change.previous]}, ab ${STATUS_LABEL[change.current]}`, changed: change.trend !== 'same' }
+                      : null;
                     return (
                       <div
                         key={idx}
@@ -426,7 +494,10 @@ export const StockScreen: React.FC<StockScreenProps> = ({
                 </div>
                 <div className="space-y-2">
                   {grouped.low.map((item, idx) => {
-                    const comparison = compareWithPreviousScan(item.name, item.status);
+                    const change = currentScanId ? compareWithPreviousScan(currentScanId, item.name, item.matched_sku) : null;
+                    const comparison = change && change.previous
+                      ? { label: change.trend === 'same' ? `Pichli photo jaisa (${STATUS_LABEL[change.current]})` : `Pehle ${STATUS_LABEL[change.previous]}, ab ${STATUS_LABEL[change.current]}`, changed: change.trend !== 'same' }
+                      : null;
                     return (
                       <div
                         key={idx}
@@ -524,7 +595,7 @@ export const StockScreen: React.FC<StockScreenProps> = ({
               {/* Unique suppliers */}
               {Array.from(new Set(reorderList.map((i) => i.supplier_name))).map((supplier) => {
                 const supplierItems = reorderList.filter((i) => i.supplier_name === supplier);
-                const supplierPhone = supplierItems[0]?.supplier_phone || '9811234567';
+                const supplierPhone = supplierItems[0]?.supplier_phone || '';
 
                 return (
                   <div
@@ -534,7 +605,7 @@ export const StockScreen: React.FC<StockScreenProps> = ({
                     <div className="flex items-center justify-between">
                       <div>
                         <h4 className="text-sm font-extrabold text-[#0B3D2E]">{supplier}</h4>
-                        <p className="text-[11px] text-[#5F7A6E]">Mobile: +91 {supplierPhone}</p>
+                        <p className="text-[11px] text-[#5F7A6E]">{supplierPhone ? `Mobile: +91 ${supplierPhone}` : 'Supplier ka number nahi hai'}</p>
                       </div>
 
                       <button
@@ -624,7 +695,7 @@ export const StockScreen: React.FC<StockScreenProps> = ({
             <div>
               <h3 className="text-base font-extrabold text-[#0B3D2E]">{t.catalogTab}</h3>
               <p className="text-xs text-[#5F7A6E]">
-                Popular Indian FMCG kirana items with minimum stock levels
+                Status pichli shelf photo se. "Order" = suggested reorder size, stock ki ginti nahi.
               </p>
             </div>
 
@@ -639,9 +710,9 @@ export const StockScreen: React.FC<StockScreenProps> = ({
 
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
             {catalog.map((prod) => {
-              const cur = prod.current_level ?? 0;
-              const isLow = cur > 0 && cur <= prod.min_level;
-              const isOut = cur === 0;
+              const isLow = prod.stock_status === 'low';
+              const isOut = prod.stock_status === 'out';
+              const isUnknown = prod.stock_status === 'unknown';
 
               return (
                 <div
@@ -654,7 +725,7 @@ export const StockScreen: React.FC<StockScreenProps> = ({
                         {prod.name}
                       </h4>
                       <p className="text-[10px] text-[#5F7A6E] mt-0.5">
-                        {prod.category} • MRP ₹{prod.mrp || 20}
+                        {prod.category}{prod.mrp_paise ? ` • MRP ${formatPaise(prod.mrp_paise)}` : ''}
                       </p>
                     </div>
 
@@ -667,14 +738,16 @@ export const StockScreen: React.FC<StockScreenProps> = ({
                           : 'bg-emerald-100 text-emerald-800'
                       }`}
                     >
-                      {isOut ? 'Out of Stock' : isLow ? 'Low Stock' : 'Stock OK'}
+                      {isOut ? 'Khatam' : isLow ? 'Kam stock' : isUnknown ? 'Scan nahi hua' : 'Stock OK'}
                     </span>
                   </div>
 
                   <div className="flex items-center justify-between text-xs pt-1 border-t border-emerald-100/60">
                     <span className="text-[11px] text-gray-500">
-                      Stock: <span className="font-bold text-[#0B3D2E]">{cur}</span> / Min:{' '}
-                      {prod.min_level} {prod.unit}
+                      {prod.status_updated_at
+                        ? `Photo: ${new Date(prod.status_updated_at).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}`
+                        : 'Photo se check nahi hua'}{' '}
+                      • Order: {prod.low_stock_threshold} {prod.unit}
                     </span>
 
                     <button
@@ -682,7 +755,7 @@ export const StockScreen: React.FC<StockScreenProps> = ({
                         onAddToReorder({
                           product_id: prod.id,
                           product_name: prod.name,
-                          quantity: Math.max(10, prod.min_level * 2),
+                          quantity: Math.max(1, prod.low_stock_threshold),
                           unit: prod.unit,
                           supplier_name: prod.supplier_name,
                           supplier_phone: prod.supplier_phone,
@@ -713,7 +786,7 @@ export const StockScreen: React.FC<StockScreenProps> = ({
               >
                 <div className="flex items-center gap-3">
                   <img
-                    src={scan.image_thumbnail}
+                    src={scan.image_ref}
                     alt="Scan thumbnail"
                     className="w-16 h-16 rounded-xl object-cover shrink-0 border border-gray-200"
                   />
@@ -729,12 +802,14 @@ export const StockScreen: React.FC<StockScreenProps> = ({
 
                 <div className="text-right shrink-0">
                   <span className="text-xs font-bold text-[#0B3D2E] block">
-                    {scan.results.length} SKUs Identified
+                    {scan.detected_items.length} items check kiye •{' '}
+                    {scan.detected_items.filter((d) => d.status === 'out' || d.status === 'low').length} khatam/kam
                   </span>
                   <button
                     onClick={() => {
-                      setCurrentScanImage(scan.image_thumbnail);
-                      setCurrentScanResults(scan.results);
+                      setCurrentScanImage(scan.image_ref);
+                      setCurrentScanResults(scan.detected_items);
+                      setCurrentScanId(scan.id);
                       setScanNotes(scan.overall_notes);
                       setActiveTab('scan');
                     }}
@@ -779,9 +854,20 @@ export const StockScreen: React.FC<StockScreenProps> = ({
               />
             </div>
 
+            <div>
+              <label className="text-xs font-bold text-gray-700 block mb-1">Dusre naam (comma se)</label>
+              <input
+                type="text"
+                value={newSkuAliases}
+                onChange={(e) => setNewSkuAliases(e.target.value)}
+                placeholder="e.g. bhujia, namkeen"
+                className="w-full p-2.5 rounded-xl border border-emerald-200 text-xs"
+              />
+            </div>
+
             <div className="grid grid-cols-2 gap-2">
               <div>
-                <label className="text-xs font-bold text-gray-700 block mb-1">Min Stock</label>
+                <label className="text-xs font-bold text-gray-700 block mb-1">Reorder qty</label>
                 <input
                   type="number"
                   value={newSkuMin}

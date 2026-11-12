@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Undo2, CheckCircle2, X } from 'lucide-react';
 import { Transaction } from '../../types';
-import { formatINR } from '../../utils/formatters';
+import { formatPaise } from '../../lib/money';
 
 interface UndoToastProps {
   lastAction: {
@@ -25,21 +25,19 @@ export const UndoToast: React.FC<UndoToastProps> = ({
   useEffect(() => {
     if (!lastAction) return;
 
-    setProgress(100);
     const duration = 5000; // 5 seconds
-    const interval = 50;
-    const step = (interval / duration) * 100;
+    const started = Date.now();
+    setProgress(100);
 
+    // Dismiss from the timer callback, not inside a state updater (that would update App during render).
     const timer = setInterval(() => {
-      setProgress((prev) => {
-        if (prev <= 0) {
-          clearInterval(timer);
-          onDismiss();
-          return 0;
-        }
-        return prev - step;
-      });
-    }, interval);
+      const left = Math.max(0, 100 - ((Date.now() - started) / duration) * 100);
+      setProgress(left);
+      if (left <= 0) {
+        clearInterval(timer);
+        onDismiss();
+      }
+    }, 50);
 
     return () => clearInterval(timer);
   }, [lastAction, onDismiss]);
@@ -68,7 +66,7 @@ export const UndoToast: React.FC<UndoToastProps> = ({
                 {isCredit ? 'Udhaar Entry Saved' : 'Payment Received'}
               </p>
               <p className="text-sm font-bold text-white truncate">
-                {customerName}: {formatINR(transaction.amount)}
+                {customerName}: {formatPaise(transaction.amount_paise)}
               </p>
             </div>
           </div>

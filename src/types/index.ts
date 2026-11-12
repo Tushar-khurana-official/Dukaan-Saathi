@@ -1,52 +1,80 @@
-export type Language = 'hinglish' | 'hindi' | 'english';
+/**
+ * Data model — mirrors the "Data model" table in the build spec.
+ * Rules: every record belongs to one shop (shop_id); money is integer paise, never decimals.
+ */
+import type { KhataIntent, ParsedKhata } from '../lib/khataParser';
+import type { ShelfStatus } from '../lib/shelf';
 
+export type Language = 'hinglish' | 'hindi' | 'english';
 export type ReminderTone = 'polite' | 'friendly' | 'firm';
 
+/** Shop: one per kirana. */
 export interface ShopProfile {
-  name: string;
-  owner: string;
-  upi_id: string;
-  language: Language;
-  consent_accepted: boolean;
-  phone?: string;
-  address?: string;
-}
-
-export interface Customer {
   id: string;
   name: string;
+  owner: string;
+  owner_phone: string;
+  upi_id: string;
+  language: Language;
+  created_at: string;
+  /** Owner accepted the data-use notice (udhaar tracking and payment reminders only). */
+  consent_accepted: boolean;
+  address?: string;
+  /** Per-shop reminder settings. Sending is always manual in this prototype. */
+  reminder_settings: {
+    default_tone: ReminderTone;
+    language: Language;
+  };
+}
+
+/** Customer. Phone is personal data: it may only be stored with consent (consent_given_at). */
+export interface Customer {
+  id: string;
+  shop_id: string;
+  name: string;
   phone: string;
+  /** ISO date when the customer agreed to their phone number being stored; null = no consent, no phone. */
+  consent_given_at: string | null;
   note: string;
   created_at: string;
   avatar_color?: string;
 }
 
-export type TransactionType = 'credit' | 'payment';
-export type TransactionSource = 'voice' | 'text' | 'manual' | 'photo';
+export type TransactionType = 'credit' | 'payment' | 'sale';
+export type TransactionSource = 'voice' | 'text' | 'manual';
 
+/** Transaction. Saved only after the owner confirms, so confirmed_at is always set. */
 export interface Transaction {
   id: string;
-  customer_id: string;
+  shop_id: string;
+  /** null for counter sales that are not tied to a customer */
+  customer_id: string | null;
   type: TransactionType;
-  amount: number;
+  amount_paise: number;
   note: string;
-  date: string;
   source: TransactionSource;
+  confirmed_at: string;
 }
 
+export type StockStatus = ShelfStatus;
+
+/** Product. Aliases support Hinglish names ("namak" for Tata Salt). No unit counts are tracked. */
 export interface Product {
   id: string;
+  shop_id: string;
   name: string;
+  aliases: string[];
   category: string;
-  min_level: number;
-  current_level?: number;
+  /** Suggested reorder size when the item is flagged low or out (an order quantity, not stock on hand). */
+  low_stock_threshold: number;
   unit: string;
   supplier_name: string;
   supplier_phone: string;
-  mrp?: number;
+  mrp_paise?: number;
+  /** Last status seen on a shelf photo. */
+  stock_status: StockStatus;
+  status_updated_at?: string;
 }
-
-export type StockStatus = 'ok' | 'low' | 'out' | 'unknown';
 
 export interface DetectedProduct {
   name: string;
@@ -57,13 +85,16 @@ export interface DetectedProduct {
   box_2d?: [number, number, number, number]; // [ymin, xmin, ymax, xmax] 0-1000
 }
 
+/** ShelfScan: stores gaps and low-stock flags, not counts. */
 export interface ShelfScan {
   id: string;
-  image_thumbnail: string;
-  created_at: string;
+  shop_id: string;
+  /** Image reference (a data URL in the prototype; an object-store key once there is a backend). */
+  image_ref: string;
+  detected_items: DetectedProduct[];
   overall_notes: string;
   quality_warning?: string | null;
-  results: DetectedProduct[];
+  created_at: string;
 }
 
 export interface ReorderItem {
@@ -75,27 +106,22 @@ export interface ReorderItem {
   supplier_phone: string;
 }
 
+/** Reminder: records that the owner OPENED the WhatsApp link, not that a message was sent. */
 export interface ReminderLog {
   id: string;
+  shop_id: string;
   customer_id: string;
-  customer_name: string;
-  sent_at: string;
   channel: 'whatsapp';
-  amount: number;
+  text: string;
+  amount_paise: number;
   tone: ReminderTone;
-  message_preview: string;
+  link_opened_at: string;
 }
 
-export interface AiParsedKhata {
-  transcript: string;
-  intent: 'add_credit' | 'add_payment' | 'query_balance' | 'list_overdue' | 'add_customer' | 'summary' | 'unknown';
-  customer_name: string;
-  matched_customer_id: string | null;
-  amount: number | null;
-  items_note: string | null;
-  confidence: number;
-  needs_clarification: boolean;
-  clarification_question: string | null;
+export type { KhataIntent };
+
+/** Parser output as shown on the "Sahi hai?" card. */
+export interface AiParsedKhata extends ParsedKhata {
   bot_reply_text: string;
   isDemo?: boolean;
 }
@@ -109,6 +135,9 @@ export interface ChatMessage {
   audioDuration?: number;
   imagePreviewUrl?: string;
   parsedKhata?: AiParsedKhata;
+  /** How the entry on this card was captured (stored as Transaction.source). */
+  entrySource?: 'voice' | 'text';
   confirmed?: boolean;
+  cancelled?: boolean;
   status?: 'sending' | 'sent' | 'delivered' | 'read';
 }

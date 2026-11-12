@@ -15,41 +15,69 @@ import {
   Smartphone,
   ExternalLink,
 } from 'lucide-react';
-import { Language, ShopProfile } from '../../types';
+import { Language, ReminderTone, ShopProfile } from '../../types';
+import { isValidUpiId } from '../../lib/reminders';
+import { account } from '../../services/account';
 
 interface SettingsScreenProps {
   profile: ShopProfile;
   onUpdateProfile: (p: ShopProfile) => void;
   onResetToDemo: () => void;
-  onExportData: () => any;
-  onImportData: (data: any) => boolean;
+  onClearAllData: () => void;
+  onExportData: () => object;
+  onImportData: (data: unknown) => boolean;
+  mode: 'shop' | 'demo';
+  accountEmail?: string;
+  onLogout: () => void;
 }
 
 export const SettingsScreen: React.FC<SettingsScreenProps> = ({
   profile,
   onUpdateProfile,
   onResetToDemo,
+  onClearAllData,
   onExportData,
   onImportData,
+  mode,
+  accountEmail,
+  onLogout,
 }) => {
+  const [pwCurrent, setPwCurrent] = useState('');
+  const [pwNext, setPwNext] = useState('');
+  const [pwMsg, setPwMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+  const handleChangePassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      await account.changePassword(pwCurrent, pwNext);
+      setPwMsg({ ok: true, text: 'Password badal gaya' });
+      setPwCurrent('');
+      setPwNext('');
+    } catch (err) {
+      setPwMsg({ ok: false, text: err instanceof Error ? err.message : 'Password nahi badla' });
+    }
+  };
+
   const [shopName, setShopName] = useState(profile.name);
   const [ownerName, setOwnerName] = useState(profile.owner);
   const [upiId, setUpiId] = useState(profile.upi_id);
-  const [phone, setPhone] = useState(profile.phone || '9811234567');
+  const [phone, setPhone] = useState(profile.owner_phone);
   const [savedSuccess, setSavedSuccess] = useState(false);
-
-  // Toggles for UI-only notification preferences
-  const [smsReminder, setSmsReminder] = useState(true);
-  const [soundEffects, setSoundEffects] = useState(true);
+  const [upiError, setUpiError] = useState(false);
 
   const handleSaveProfile = (e: React.FormEvent) => {
     e.preventDefault();
+    if (!isValidUpiId(upiId)) {
+      setUpiError(true);
+      return;
+    }
+    setUpiError(false);
     onUpdateProfile({
       ...profile,
       name: shopName.trim() || 'Hamari Dukaan',
-      owner: ownerName.trim() || 'Owner',
-      upi_id: upiId.trim() || 'shop@upi',
-      phone: phone.trim(),
+      owner: ownerName.trim(),
+      upi_id: upiId.trim(),
+      owner_phone: phone.replace(/\D/g, '').slice(-10),
     });
     setSavedSuccess(true);
     setTimeout(() => setSavedSuccess(false), 2500);
@@ -134,6 +162,7 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
               onChange={(e) => setUpiId(e.target.value)}
               className="w-full p-2.5 rounded-xl border border-emerald-200 text-xs font-mono text-[#0B3D2E]"
             />
+            {upiError && <p className="text-[11px] text-rose-600 font-bold mt-1">UPI ID aisi dikhni chahiye: naam@bank</p>}
           </div>
 
           <div>
@@ -164,38 +193,75 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
         </div>
       </form>
 
-      {/* Notifications & Sound (UI Toggles) */}
+      {/* Reminder settings (per shop). Sending stays manual. */}
       <div className="bg-white p-5 rounded-3xl shadow-xs border border-emerald-100 space-y-3">
         <h3 className="text-sm font-extrabold text-[#0B3D2E] flex items-center gap-2">
           <Bell className="w-4 h-4 text-[#1F7A5C]" />
-          <span>Preferences & Sound</span>
+          <span>Reminder settings</span>
         </h3>
-
-        <div className="flex items-center justify-between py-2 border-b border-gray-100 text-xs">
-          <div>
-            <span className="font-bold text-[#123D31] block">Automatic WhatsApp Pre-fill</span>
-            <span className="text-[#5F7A6E]">Open wa.me link directly with UPI deep link</span>
-          </div>
-          <input
-            type="checkbox"
-            checked={smsReminder}
-            onChange={(e) => setSmsReminder(e.target.checked)}
-            className="w-4 h-4 text-[#25D366] rounded"
-          />
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+          <label className="block">
+            <span className="font-bold text-gray-700 block mb-1">Message ki bhasha</span>
+            <select
+              value={profile.reminder_settings.language}
+              onChange={(e) =>
+                onUpdateProfile({ ...profile, reminder_settings: { ...profile.reminder_settings, language: e.target.value as Language } })
+              }
+              className="w-full p-2.5 rounded-xl border border-emerald-200 bg-white"
+            >
+              <option value="hinglish">Hinglish</option>
+              <option value="hindi">हिंदी</option>
+              <option value="english">English</option>
+            </select>
+          </label>
+          <label className="block">
+            <span className="font-bold text-gray-700 block mb-1">Tone</span>
+            <select
+              value={profile.reminder_settings.default_tone}
+              onChange={(e) =>
+                onUpdateProfile({ ...profile, reminder_settings: { ...profile.reminder_settings, default_tone: e.target.value as ReminderTone } })
+              }
+              className="w-full p-2.5 rounded-xl border border-emerald-200 bg-white"
+            >
+              <option value="polite">Vinamra (polite)</option>
+              <option value="friendly">Dostana (friendly)</option>
+              <option value="firm">Sakht (firm)</option>
+            </select>
+          </label>
         </div>
+        <p className="text-[11px] text-[#5F7A6E]">
+          Reminder WhatsApp mein khulta hai aur aap khud "send" dabate hain. Automatic bhejna WhatsApp Cloud API
+          approval aur aapki manzoori ke baad hi aayega.
+        </p>
+      </div>
 
-        <div className="flex items-center justify-between py-2 text-xs">
-          <div>
-            <span className="font-bold text-[#123D31] block">Voice Audio Waveform Animations</span>
-            <span className="text-[#5F7A6E]">Live audio feedback while recording</span>
-          </div>
-          <input
-            type="checkbox"
-            checked={soundEffects}
-            onChange={(e) => setSoundEffects(e.target.checked)}
-            className="w-4 h-4 text-[#25D366] rounded"
-          />
-        </div>
+      {/* Account */}
+      <div className="bg-white p-5 rounded-3xl shadow-xs border border-emerald-100 space-y-3 text-xs">
+        <h3 className="text-sm font-extrabold text-[#0B3D2E] flex items-center gap-2">
+          <User className="w-4 h-4 text-[#1F7A5C]" />
+          <span>Account</span>
+        </h3>
+        {mode === 'demo' ? (
+          <p className="text-[#5F7A6E]">
+            Aap demo mein hain: data sirf is browser mein hai. Apni dukaan ke liye login karein ya account banayein.
+          </p>
+        ) : (
+          <>
+            <p className="text-[#5F7A6E]">
+              Login: <span className="font-bold text-[#123D31]">{accountEmail}</span>. Khata server par save hota hai aur
+              kisi bhi phone se login karke mil jayega.
+            </p>
+            <form onSubmit={handleChangePassword} className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+              <input type="password" required placeholder="Purana password" value={pwCurrent} onChange={(e) => setPwCurrent(e.target.value)} className="p-2.5 rounded-xl border border-emerald-200" />
+              <input type="password" required minLength={8} placeholder="Naya password (8+)" value={pwNext} onChange={(e) => setPwNext(e.target.value)} className="p-2.5 rounded-xl border border-emerald-200" />
+              <button type="submit" className="py-2.5 rounded-xl bg-[#0B3D2E] text-white font-bold">Password badlein</button>
+            </form>
+            {pwMsg && <p className={`font-bold ${pwMsg.ok ? 'text-emerald-700' : 'text-rose-600'}`}>{pwMsg.text}</p>}
+          </>
+        )}
+        <button onClick={onLogout} className="py-2 px-4 rounded-xl bg-gray-100 hover:bg-gray-200 font-bold text-[#123D31]">
+          {mode === 'demo' ? 'Demo band karein / Login' : 'Logout'}
+        </button>
       </div>
 
       {/* Data Backup & Restore */}
@@ -206,10 +272,10 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
         </h3>
 
         <p className="text-xs text-[#5F7A6E] leading-relaxed">
-          Aapka saara data aapke browser ke LocalStorage mein surakshit hai. Phone badalne ya backup lene ke liye export karein.
+          {mode === 'shop' ? 'Aapka khata server par save hota hai (upar "Saved" dikhega). Extra safety ke liye JSON backup bhi le sakte hain.' : 'Demo mein data sirf isi browser mein hai. Browser data saaf karne par mit jayega.'}
         </p>
 
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <button
             onClick={handleExportJson}
             className="py-2.5 px-3 rounded-xl bg-gray-50 hover:bg-emerald-50 text-[#0B3D2E] font-bold text-xs flex items-center justify-center gap-1.5 border border-emerald-200"
@@ -225,6 +291,7 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
           </label>
 
           <button
+            hidden={mode === 'shop'}
             onClick={() => {
               if (confirm('Kya aap demo data (12 grahak, 40 transactions, 25 SKUs) reload karna chahte hain?')) {
                 onResetToDemo();
@@ -235,6 +302,18 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
           >
             <RotateCcw className="w-4 h-4" />
             <span>Reset Demo Data</span>
+          </button>
+
+          <button
+            onClick={() => {
+              if (confirm('Saare grahak, khata aur reminders delete karke khali khata shuru karein? Pehle backup export kar lein.')) {
+                onClearAllData();
+              }
+            }}
+            className="py-2.5 px-3 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 font-bold text-xs flex items-center justify-center gap-1.5 border border-rose-200"
+          >
+            <Trash2 className="w-4 h-4" />
+            <span>Khali khata (sab delete)</span>
           </button>
         </div>
       </div>
@@ -252,14 +331,21 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
 
         <div className="p-3.5 rounded-2xl bg-emerald-50/60 border border-emerald-100 text-[11px] text-[#5F7A6E] space-y-1.5">
           <p>
-            • <strong className="text-[#0B3D2E]">Simulated WhatsApp vs Real:</strong> Sending messages triggers authentic <code>wa.me</code> deep links with prefilled text and UPI links. Dukaan Saathi does not silently transmit data without shopkeeper review.
+            • <strong className="text-[#0B3D2E]">Data ka upyog:</strong> grahak ka data sirf udhaar ke hisaab aur payment reminder ke liye.
           </p>
           <p>
-            • <strong className="text-[#0B3D2E]">Visual Scanner Limits:</strong> The AI flags shelf gaps and low stock relative to shelf facing, not exact unit counts.
+            • <strong className="text-[#0B3D2E]">Phone number:</strong> sirf grahak ki sehmati se, sehmati ki tareekh ke saath. Grahak ka data Khata screen se export ya delete karein.
           </p>
           <p>
-            • <strong className="text-[#0B3D2E]">DPDP Compliance:</strong> All records are stored strictly on this client device.
+            • <strong className="text-[#0B3D2E]">AI:</strong> voice note, shelf photo aur grahakon ke naam Google Gemini ko server ke through bheje jaate hain. Phone number aur balance nahi. Server logs mein naam/number nahi likhe jaate.
           </p>
+          <p>
+            • <strong className="text-[#0B3D2E]">WhatsApp:</strong> app ke andar ka chat ek simulation hai. Reminders asli WhatsApp mein khulte hain; bhejna aap dabate hain.
+          </p>
+          <p>
+            • <strong className="text-[#0B3D2E]">Shelf scanner:</strong> khali jagah aur kam stock batata hai, sahi ginti nahi.
+          </p>
+          <p className="italic">Yeh product requirement hai, kanooni salah nahi. Asli pilot se pehle vakeel se review karwayein.</p>
         </div>
       </div>
     </div>

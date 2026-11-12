@@ -174,7 +174,7 @@ export const Navigation: React.FC<NavigationProps> = ({
             }`}
           >
             <BellRing className={`w-5 h-5 ${currentTab === 'reminders' ? 'text-[#1F7A5C]' : ''}`} />
-            <span className="text-[10px] mt-0.5">Takeda</span>
+            <span className="text-[10px] mt-0.5">Reminder</span>
           </button>
         </div>
       </nav>
