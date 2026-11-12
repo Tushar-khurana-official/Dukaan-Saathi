@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   Mic,
   Send,
@@ -12,6 +12,9 @@ import {
   StopCircle,
   Volume2,
   AlertTriangle,
+  History,
+  SquarePen,
+  Trash2,
 } from 'lucide-react';
 import {
   AiParsedKhata,
@@ -31,6 +34,8 @@ import { translations } from '../../utils/translations';
 import { parseKhataMessage, analyzeShelfImage } from '../../services/api';
 import { preparePhoto } from '../../lib/image';
 import { useAudioRecorder } from '../../hooks/useAudioRecorder';
+import { useChatHistory } from '../../hooks/useChatHistory';
+import { formatRelativeDate } from '../../utils/formatters';
 
 interface AssistantChatProps {
   profile: ShopProfile;
@@ -84,9 +89,9 @@ export const AssistantChat: React.FC<AssistantChatProps> = ({
 }) => {
   const t = translations[language].assistant;
 
-  const [messages, setMessages] = useState<ChatMessage[]>([
-    {
-      id: 'msg-welcome',
+  const makeWelcome = useCallback(
+    (): ChatMessage => ({
+      id: `msg-welcome-${Date.now()}`,
       sender: 'bot',
       timestamp: new Date().toISOString(),
       text:
@@ -96,9 +101,13 @@ export const AssistantChat: React.FC<AssistantChatProps> = ({
             ? 'Hello! I am Dukaan Saathi. Speak or type a credit, payment or sale. Nothing is saved until you confirm it.'
             : 'Namaste! Main aapka Dukaan Saathi hoon. Boliye ya likhiye, jaise "Sharma ji ko 500 udhaar" ya "Sunita ji ne 300 diye". Har entry aapke "Sahi hai" ke baad hi save hogi.',
       status: 'read',
-    },
-  ]);
-  const [drafts, setDrafts] = useState<Record<string, Draft>>({});
+    }),
+    [language],
+  );
+  // Chats live in browser storage, so they survive switching tabs and reloads; old chats are in the history panel.
+  const { conversations, activeId, messages, drafts, setMessages, setDrafts, newChat, openChat, deleteChat } =
+    useChatHistory<Draft>(makeWelcome);
+  const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [editingCardId, setEditingCardId] = useState<string | null>(null);
   const [inputText, setInputText] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
@@ -130,6 +139,11 @@ export const AssistantChat: React.FC<AssistantChatProps> = ({
   };
 
   const customerName = (id: string | null) => customers.find((c) => c.id === id)?.name ?? null;
+  /** Two customers with the same name are told apart by their note ("paras (near shop)"). */
+  const customerLabel = (c: Customer) => {
+    const twins = customers.filter((x) => x.name.trim().toLowerCase() === c.name.trim().toLowerCase()).length > 1;
+    return twins && c.note ? `${c.name} (${c.note})` : c.name;
+  };
 
   const handleParsedResponse = (parsed: AiParsedKhata, entrySource: 'voice' | 'text') => {
     if (parsed.intent === 'add_credit' || parsed.intent === 'add_payment' || parsed.intent === 'add_sale') {
@@ -366,11 +380,91 @@ export const AssistantChat: React.FC<AssistantChatProps> = ({
             </div>
           </div>
         </div>
-        <button onClick={() => fileInputRef.current?.click()} className="p-2 rounded-full hover:bg-white/10 text-emerald-100" title="Shelf photo bhejein">
-          <Camera className="w-5 h-5" />
-        </button>
+        <div className="flex items-center gap-1">
+          <button
+            onClick={() => {
+              newChat();
+              setEditingCardId(null);
+              setIsHistoryOpen(false);
+            }}
+            className="p-2 rounded-full hover:bg-white/10 text-emerald-100"
+            title="Naya chat"
+            aria-label="Naya chat"
+          >
+            <SquarePen className="w-5 h-5" />
+          </button>
+          <button
+            onClick={() => setIsHistoryOpen((v) => !v)}
+            className={`p-2 rounded-full hover:bg-white/10 text-emerald-100 ${isHistoryOpen ? 'bg-white/15' : ''}`}
+            title="Purane chat"
+            aria-label="Purane chat"
+          >
+            <History className="w-5 h-5" />
+          </button>
+          <button onClick={() => fileInputRef.current?.click()} className="p-2 rounded-full hover:bg-white/10 text-emerald-100" title="Shelf photo bhejein">
+            <Camera className="w-5 h-5" />
+          </button>
+        </div>
         <input type="file" ref={fileInputRef} accept="image/*" capture="environment" className="hidden" onChange={handleShelfPhotoUpload} />
       </div>
+
+      {isHistoryOpen && (
+        <div className="absolute inset-x-0 top-[64px] bottom-0 z-20 flex">
+          <div className="w-full sm:w-80 bg-white border-r border-emerald-100 shadow-xl flex flex-col">
+            <div className="p-3 border-b border-emerald-50 flex items-center justify-between">
+              <span className="text-xs font-extrabold text-[#0B3D2E] uppercase tracking-wider">Purane chat</span>
+              <button
+                onClick={() => {
+                  newChat();
+                  setEditingCardId(null);
+                  setIsHistoryOpen(false);
+                }}
+                className="text-xs font-bold text-[#1F7A5C] flex items-center gap-1 hover:underline"
+              >
+                <SquarePen className="w-3.5 h-3.5" /> Naya chat
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-2 space-y-1">
+              {conversations
+                .filter((c) => c.id === activeId || c.messages.some((m) => m.sender === 'user'))
+                .map((c) => (
+                  <div
+                    key={c.id}
+                    className={`group flex items-center gap-2 p-2.5 rounded-xl cursor-pointer ${
+                      c.id === activeId ? 'bg-[#DDF3E7]' : 'hover:bg-gray-50'
+                    }`}
+                    onClick={() => {
+                      openChat(c.id);
+                      setEditingCardId(null);
+                      setIsHistoryOpen(false);
+                    }}
+                  >
+                    <div className="min-w-0 flex-1">
+                      <p className="text-xs font-bold text-[#123D31] truncate">{c.title}</p>
+                      <p className="text-[10px] text-[#5F7A6E]">
+                        {formatRelativeDate(c.updated_at, language)} • {c.messages.filter((m) => m.sender === 'user').length} message
+                      </p>
+                    </div>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (confirm('Yeh chat delete karein? (Khate ki entries delete nahi hongi)')) deleteChat(c.id);
+                      }}
+                      className="p-1 rounded-lg text-gray-400 hover:text-rose-600 hover:bg-rose-50"
+                      title="Chat delete karein"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                ))}
+            </div>
+            <p className="p-3 text-[10px] text-gray-400 border-t border-gray-100">
+              Chat sirf is phone/browser mein save hote hain. Logout par mit jaate hain.
+            </p>
+          </div>
+          <div className="flex-1 bg-black/20 hidden sm:block" onClick={() => setIsHistoryOpen(false)} />
+        </div>
+      )}
 
       <div className="flex-1 overflow-y-auto p-4 space-y-3.5 bg-[radial-gradient(#d6e8de_1px,transparent_1px)] [background-size:16px_16px]">
         {messages.map((msg) => {
@@ -440,13 +534,13 @@ export const AssistantChat: React.FC<AssistantChatProps> = ({
                                   {suggested.length > 0 && (
                                     <optgroup label="Milte-julte naam">
                                       {suggested.map((c) => (
-                                        <option key={c.id} value={c.id}>{c.name}</option>
+                                        <option key={c.id} value={c.id}>{customerLabel(c)}</option>
                                       ))}
                                     </optgroup>
                                   )}
                                   <optgroup label="Sabhi grahak">
                                     {rest.map((c) => (
-                                      <option key={c.id} value={c.id}>{c.name}</option>
+                                      <option key={c.id} value={c.id}>{customerLabel(c)}</option>
                                     ))}
                                   </optgroup>
                                   <option value={NEW_CUSTOMER}>+ Naya grahak banayein</option>

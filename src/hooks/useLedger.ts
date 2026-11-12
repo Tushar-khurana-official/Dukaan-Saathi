@@ -105,6 +105,12 @@ export function useLedger() {
 
   const clearUndo = useCallback(() => setLastAction(null), []);
 
+  /** Remove a wrong entry (owner confirms in the UI). Balances are recomputed from the log. */
+  const deleteTransaction = useCallback((id: string) => {
+    setTransactions((prev) => prev.filter((t) => t.id !== id));
+    setLastAction((prev) => (prev?.id === id ? null : prev));
+  }, []);
+
   const addCustomer = useCallback(
     (data: NewCustomer) => {
       const phone = data.phone.replace(/\D/g, '').slice(-10);
@@ -229,6 +235,7 @@ export function useLedger() {
     addTransaction,
     undoLastTransaction,
     clearUndo,
+    deleteTransaction,
     addCustomer,
     updateCustomer,
     recordConsent,

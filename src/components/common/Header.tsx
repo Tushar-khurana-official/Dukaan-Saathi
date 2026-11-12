@@ -91,7 +91,8 @@ export const Header: React.FC<HeaderProps> = ({
           <button onClick={onLogout} className="p-1.5 rounded-lg hover:bg-white/10" title={mode === 'demo' ? 'Demo band karein' : 'Logout'} aria-label="Logout">
             <LogOut className="w-5 h-5" />
           </button>
-          {/* Demo Guide Stepper Button */}
+          {/* Demo Guide: only in demo mode */}
+          {mode === 'demo' && (
           <button
             onClick={onOpenDemoGuide}
             className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-[#F5A623] hover:bg-[#e09315] text-[#0B3D2E] font-semibold text-xs transition-transform active:scale-95 shadow-sm"
@@ -101,6 +102,7 @@ export const Header: React.FC<HeaderProps> = ({
             <span className="hidden sm:inline">Demo Guide</span>
             <span className="sm:hidden">Demo</span>
           </button>
+          )}
 
           {/* Language Toggle */}
           <div className="flex items-center bg-emerald-950/70 p-0.5 rounded-lg border border-emerald-800 text-xs">

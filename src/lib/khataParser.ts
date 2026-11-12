@@ -68,7 +68,7 @@ function scorePhrases(text: string, phrases: Array<[RegExp, number]>): number {
 
 /** The spoken name is usually the words before "ko" / "ne" / "ka" / "se", or before the amount. */
 function extractNamePhrase(tokens: string[], amountStart: number | null): string {
-  const markerIdx = tokens.findIndex((t) => t === 'ko' || t === 'ne' || t === 'ka' || t === 'ki' || t === 'se');
+  const markerIdx = tokens.findIndex((t) => t === 'ko' || t === 'ne' || t === 'ka' || t === 'ki' || t === 'ke' || t === 'se');
   let end = markerIdx >= 0 ? markerIdx : amountStart ?? tokens.length;
   if (amountStart !== null && amountStart < end) end = amountStart;
   const fillers = new Set(['umm', 'um', 'haan', 'accha', 'acha', 'arre', 'achha', 'ok', 'okay', 'woh', 'vo', 'bhaiya', 'suno', 'likho']);
