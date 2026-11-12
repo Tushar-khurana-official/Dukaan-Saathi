@@ -1,0 +1,13 @@
+{
+  "name": "Dukaan Saathi",
+  "short_name": "Dukaan Saathi",
+  "description": "Voice khata, UPI reminders and shelf scanner for kirana shops",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#F2F8F5",
+  "theme_color": "#0B3D2E",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

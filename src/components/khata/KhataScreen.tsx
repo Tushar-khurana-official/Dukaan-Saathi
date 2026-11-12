@@ -26,7 +26,8 @@ import { Customer, Language, ReminderLog, ShopProfile, Transaction } from '../..
 import type { NewCustomer, NewTransaction } from '../../hooks/useLedger';
 import { calculateBharosaScore, formatRelativeDate, getOverdueSeverity } from '../../utils/formatters';
 import { formatPaise, parseRupeeInput } from '../../lib/money';
-import { buildReminderMessage, createWhatsAppShareUrl, createWhatsAppUrl } from '../../lib/reminders';
+import { buildReceiptMessage, buildReminderMessage, createWhatsAppShareUrl, createWhatsAppUrl } from '../../lib/reminders';
+import { CustomerExtras, customerStatementUrl } from './CustomerExtras';
 import { translations } from '../../utils/translations';
 
 interface KhataScreenProps {
@@ -37,7 +38,11 @@ interface KhataScreenProps {
   customerBalances: Map<string, { balance: number; lastTxDate?: string }>;
   onAddTransaction: (tx: NewTransaction) => Transaction;
   onAddCustomer: (cust: NewCustomer) => Customer;
-  onUpdateCustomer: (id: string, updates: Partial<Pick<Customer, 'name' | 'note'>>) => void;
+  onUpdateCustomer: (
+    id: string,
+    updates: Partial<Pick<Customer, 'name' | 'note' | 'receipts_opt_in' | 'statement_key' | 'credit_limit_paise'>>,
+  ) => void;
+  mode: 'shop' | 'demo';
   onDeleteTransaction: (id: string) => void;
   onRecordConsent: (id: string, phone: string) => void;
   onWithdrawConsent: (id: string) => void;
@@ -67,6 +72,7 @@ export const KhataScreen: React.FC<KhataScreenProps> = ({
   onExportCustomer,
   onLogReminderOpened,
   onOpenUpiQr,
+  mode,
 }) => {
   const t = translations[language].khata;
 
@@ -87,6 +93,8 @@ export const KhataScreen: React.FC<KhataScreenProps> = ({
   const [newCustNote, setNewCustNote] = useState('');
   const [newCustConsent, setNewCustConsent] = useState(false);
   const [isEditingCustomer, setIsEditingCustomer] = useState(false);
+  /** The entry just saved, so the owner can send a receipt (customers who opted in only). */
+  const [lastReceipt, setLastReceipt] = useState<{ customerId: string; type: 'credit' | 'payment'; amountPaise: number; balancePaise: number } | null>(null);
   const [editName, setEditName] = useState('');
   const [editNote, setEditNote] = useState('');
 
@@ -148,6 +156,12 @@ export const KhataScreen: React.FC<KhataScreenProps> = ({
       amount_paise: amountPaise,
       note: txNote.trim() || (txType === 'credit' ? 'Udhaar Saman' : 'Payment Jama'),
       source: 'manual',
+    });
+    setLastReceipt({
+      customerId: selectedCustomer.id,
+      type: txType,
+      amountPaise,
+      balancePaise: selectedBalance + (txType === 'credit' ? amountPaise : -amountPaise),
     });
 
     setTxAmount('');
@@ -615,6 +629,50 @@ export const KhataScreen: React.FC<KhataScreenProps> = ({
                 )}
               </div>
 
+              {/* Receipt for the entry just saved */}
+              {lastReceipt && lastReceipt.customerId === selectedCustomer.id && (
+                <div className="p-3 rounded-2xl bg-emerald-50 border border-emerald-200 text-xs flex items-center justify-between gap-2">
+                  <span className="font-bold text-emerald-900">
+                    Entry save ho gayi. Naya baaki {formatPaise(Math.max(0, lastReceipt.balancePaise))}.
+                  </span>
+                  {selectedCustomer.receipts_opt_in && selectedCustomer.phone ? (
+                    <button
+                      onClick={() => {
+                        const text = buildReceiptMessage({
+                          type: lastReceipt.type,
+                          amountPaise: lastReceipt.amountPaise,
+                          balancePaise: lastReceipt.balancePaise,
+                          shopName: profile.name,
+                          language: profile.reminder_settings.language,
+                          statementUrl: customerStatementUrl(profile, selectedCustomer),
+                        });
+                        const url = createWhatsAppUrl(selectedCustomer.phone, text);
+                        if (url) window.open(url, '_blank', 'noopener');
+                        setLastReceipt(null);
+                      }}
+                      className="px-3 py-1.5 rounded-lg bg-[#25D366] text-[#0B3D2E] font-bold shrink-0"
+                    >
+                      Receipt bhejein
+                    </button>
+                  ) : (
+                    <button onClick={() => setLastReceipt(null)} className="text-gray-500 font-bold shrink-0">OK</button>
+                  )}
+                </div>
+              )}
+
+              <CustomerExtras
+                key={selectedCustomer.id}
+                customer={selectedCustomer}
+                profile={profile}
+                mode={mode}
+                transactions={selectedTxHistory}
+                score={bharosa.score}
+                onPatch={(updates) => {
+                  onUpdateCustomer(selectedCustomer.id, updates);
+                  setSelectedCustomer({ ...selectedCustomer, ...updates });
+                }}
+              />
+
               {/* Transactions Timeline */}
               <div>
                 <h4 className="text-xs font-bold text-[#123D31] uppercase tracking-wider mb-2.5">
@@ -740,6 +798,13 @@ export const KhataScreen: React.FC<KhataScreenProps> = ({
                 autoFocus
               />
             </div>
+              {txType === 'credit' && selectedCustomer.credit_limit_paise && (parseRupeeInput(txAmount) ?? 0) > 0 &&
+                selectedBalance + (parseRupeeInput(txAmount) ?? 0) > selectedCustomer.credit_limit_paise && (
+                  <p className="text-[11px] font-bold text-amber-800 mt-1">
+                    ⚠️ Is entry ke baad baaki {formatPaise(selectedBalance + (parseRupeeInput(txAmount) ?? 0))} hoga, jo aapki seema{' '}
+                    {formatPaise(selectedCustomer.credit_limit_paise)} se zyada hai. Phir bhi save kar sakte hain.
+                  </p>
+                )}
 
             <div>
               <label className="text-xs font-bold text-gray-700 block mb-1">Saman / Note</label>

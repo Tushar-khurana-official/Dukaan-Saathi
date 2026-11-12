@@ -36,7 +36,7 @@ recognition transcript is used when the browser has one.
 | --- | --- |
 | `npm run dev` | Express server + Vite dev server |
 | `npm run build` then `npm start` | Production build served by the same server |
-| `npm test` | 63 tests (parser, matching, ledger maths, reminders, shelf rules, migration, login, admin privacy, vendor isolation) |
+| `npm test` | 70 tests (parser, matching, ledger maths, reminders, receipts, credit limit, reminder day, statement links, shelf rules, migration, login, admin privacy, vendor isolation) |
 | `npm run eval` | Parser accuracy on the 50 utterances in `eval/utterances.json` |
 | `npm run eval:voice -- <folder>` | Accuracy on real recordings (see `eval/README.md`) |
 | `npm run lint` | TypeScript check |
@@ -85,6 +85,28 @@ This is a product requirement, not legal advice; get a lawyer to review it befor
 rule-based parser is unsure about. Daily summaries and reminders no longer use AI. Gemini output is
 cross-checked: the amount and customer id are re-derived by our own code. `GET /api/usage` shows token use
 per voice entry and per shelf photo, and a cost estimate if you set the price env vars (see `.env.example`).
+
+## Trust and collection features
+
+| Feature | Where | How it works |
+| --- | --- | --- |
+| Customer statement link | Khata → customer → "Grahak ka khata link" | A read-only page (`/s/<token>`) where the customer sees their own entries and balance, with a UPI pay button. Only that customer's data is returned, never phone numbers. The owner can turn the link off or make a new one; old links then stop working. Needs a login (the khata must be on the server). |
+| Receipt after each entry | Khata → customer → tick "Har entry ke baad WhatsApp receipt"; then a "Receipt bhejein" button after every saved entry (Khata and chat) | Short WhatsApp message with the entry, the new balance, the shop name and the statement link if there is one. Only for customers with a phone saved with consent who agreed to receipts; the owner taps send. |
+| Credit-limit suggestion | Khata → customer → "Udhaar ki seema" | Suggests a limit from the biggest balance the customer built up and fully repaid, scaled by the Bharosa score. The owner sets the real limit; above it the app warns but still lets the owner save. |
+| Best reminder day | Reminders | The weekday each customer usually pays on (at least 3 payments and a clear favourite), plus the shop-wide pattern. Customers whose day is today or tomorrow are marked. |
+| Offline queue | Everywhere (logged-in shops) | Entries are saved on the phone first. Without signal the header shows "Offline • phone par saved"; changes upload when the network returns (also retried every 30 s and on the next app start). A service worker lets the app open with no signal. Logging out with unsent changes asks for confirmation. |
+
+Logic lives in `src/lib/customerInsights.ts`, `src/lib/statement.ts` and `src/lib/reminders.ts`, with tests in `tests/features.test.ts` and `tests/server.test.ts`.
+
+Limits: offline sync is "last save wins" for the whole khata. If two phones edit the same shop offline at the same time, the later upload replaces the earlier one. One phone per shop is fine.
+
+## Before making claims (pitch checklist)
+
+- **Voice accuracy is not measured yet.** The 100% figure is on 50 typed utterances written by the developer. Record 50 real voice notes in noisy shops and run `npm run eval:voice` before saying how well voice works.
+- **Reminders are not automatic.** Every reminder and receipt opens WhatsApp and the owner taps send. Some competitors send automatically. Automatic sending needs the WhatsApp Cloud API and Meta approval, so say "one-tap reminders", not "automatic reminders".
+- **Languages:** Hindi, English and Hinglish only.
+- **Competitor features have not been checked first-hand.** Don't claim to be better than Khatabook or OkCredit on a feature without checking it.
+- **Not built yet (later):** more Indian languages, GST billing, WhatsApp PDF bills, automatic WhatsApp sending.
 
 ## Acceptance criteria
 

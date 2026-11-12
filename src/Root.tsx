@@ -7,8 +7,9 @@ import React, { useCallback, useEffect, useState } from 'react';
 import App from './App';
 import { AdminApp } from './admin/AdminApp';
 import { LoginScreen } from './components/auth/LoginScreen';
+import { StatementPage } from './components/statement/StatementPage';
 import { account, ApiError, Me, PublicShop } from './services/account';
-import { clearLocalData, localOwner, readLocalData, setLocalOwner, writeLocalData } from './lib/storage';
+import { clearLocalData, hasUnsynced, LAST_SHOP_KEY, localOwner, readLocalData, setLocalOwner, writeLocalData } from './lib/storage';
 import { initialProducts, initialShopProfile } from './utils/seedData';
 
 type View =
@@ -45,6 +46,11 @@ function freshShopData(shop: PublicShop) {
 
 /** Put the shop's server copy into the browser cache. Returns false if loading failed. */
 async function hydrateShop(shop: PublicShop): Promise<void> {
+  // Offline queue: changes made without signal on this phone win; the app uploads them on start.
+  if (localOwner() === shop.id && hasUnsynced() && readLocalData()) {
+    rememberShop(shop);
+    return;
+  }
   const { data } = await account.loadData();
   if (data) {
     writeLocalData(data);
@@ -53,9 +59,35 @@ async function hydrateShop(shop: PublicShop): Promise<void> {
     writeLocalData(freshShopData(shop));
   }
   setLocalOwner(shop.id);
+  rememberShop(shop);
+}
+
+function rememberShop(shop: PublicShop) {
+  try {
+    localStorage.setItem(LAST_SHOP_KEY, JSON.stringify(shop));
+  } catch {
+    // ignore
+  }
+}
+
+/** The shop this phone was last logged in as, if its khata is cached here (for opening without signal). */
+function cachedShop(): PublicShop | null {
+  try {
+    const shop = JSON.parse(localStorage.getItem(LAST_SHOP_KEY) ?? 'null') as PublicShop | null;
+    return shop && localOwner() === shop.id && readLocalData() ? shop : null;
+  } catch {
+    return null;
+  }
 }
 
 export default function Root() {
+  // Customer statement links (/s/<token>) open without any login.
+  const statementMatch = window.location.pathname.match(/^\/s\/([A-Za-z0-9_-]+)\/?$/);
+  if (statementMatch) return <StatementPage token={statementMatch[1]} />;
+  return <ShopRoot />;
+}
+
+function ShopRoot() {
   const [view, setView] = useState<View>({ kind: 'loading' });
   const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -113,6 +145,12 @@ export default function Root() {
       .me()
       .then(handleMe)
       .catch((err) => {
+        // No signal but this phone has the shop's khata: open it offline; changes upload later.
+        const offlineShop = err instanceof ApiError && err.status === 0 ? cachedShop() : null;
+        if (offlineShop && !isAdminPath()) {
+          setView({ kind: 'shop', shop: offlineShop });
+          return;
+        }
         const msg =
           err instanceof ApiError && err.status !== 401
             ? 'Server (API) se connect nahi ho paya, isliye login abhi kaam nahi karega. Demo chal sakta hai.'

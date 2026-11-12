@@ -12,7 +12,8 @@ import {
   History,
   ShieldCheck,
 } from 'lucide-react';
-import { Customer, Language, ReminderLog, ReminderTone, ShopProfile } from '../../types';
+import { Customer, Language, ReminderLog, ReminderTone, ShopProfile, Transaction } from '../../types';
+import { bestReminderDay } from '../../lib/customerInsights';
 import { formatRelativeDate } from '../../utils/formatters';
 import { formatPaise } from '../../lib/money';
 import { buildReminderMessage, createWhatsAppShareUrl, createWhatsAppUrl, isValidUpiId } from '../../lib/reminders';
@@ -24,6 +25,7 @@ interface RemindersScreenProps {
   customers: Customer[];
   customerBalances: Map<string, { balance: number; lastTxDate?: string }>;
   reminders: ReminderLog[];
+  transactions: Transaction[];
   onUpdateProfile: (p: ShopProfile) => void;
   onLogReminderOpened: (log: Pick<ReminderLog, 'customer_id' | 'text' | 'amount_paise' | 'tone'>) => void;
   onOpenUpiQr: (customerName: string, amountPaise: number) => void;
@@ -35,6 +37,7 @@ export const RemindersScreen: React.FC<RemindersScreenProps> = ({
   customers,
   customerBalances,
   reminders,
+  transactions,
   onUpdateProfile,
   onLogReminderOpened,
   onOpenUpiQr,
@@ -59,6 +62,20 @@ export const RemindersScreen: React.FC<RemindersScreenProps> = ({
       .filter((c) => c.balance > 0)
       .sort((a, b) => b.daysOverdue - a.daysOverdue);
   }, [customers, customerBalances]);
+
+  // Best day to remind: the weekday each customer usually pays on (from payments already in the khata).
+  const today = new Date().getDay();
+  const bestDays = useMemo(() => {
+    const map = new Map<string, ReturnType<typeof bestReminderDay>>();
+    for (const c of pendingCustomers) map.set(c.id, bestReminderDay(transactions.filter((t) => t.customer_id === c.id)));
+    return map;
+  }, [pendingCustomers, transactions]);
+  const shopBestDay = useMemo(() => bestReminderDay(transactions, 5), [transactions]);
+  /** Remind on the payment day itself or the day before. */
+  const goodDayToday = (id: string) => {
+    const d = bestDays.get(id)?.weekday;
+    return d !== null && d !== undefined && (d === today || d === (today + 1) % 7);
+  };
 
   const [selectedCustomerId, setSelectedCustomerId] = useState<string>(
     pendingCustomers[0]?.id || ''
@@ -131,6 +148,11 @@ export const RemindersScreen: React.FC<RemindersScreenProps> = ({
           </div>
           <p className="text-xs text-emerald-200">
             {t.subtitle} • WhatsApp khulta hai, bhejna aap dabate hain. Kuch apne-aap nahi jaata.
+            {shopBestDay.label && (
+              <span className="block mt-1 text-[#25D366] font-bold">
+                Aapke grahak aksar {shopBestDay.label} ({shopBestDay.time_of_day}) ko payment karte hain — usi din ya ek din pehle yaad dilayein.
+              </span>
+            )}
           </p>
         </div>
 
@@ -203,6 +225,11 @@ export const RemindersScreen: React.FC<RemindersScreenProps> = ({
                     <p className="text-[10px] text-[#5F7A6E]">
                       {cust.daysOverdue} din pehle • {hasNumber(cust) ? 'Seedha chat khulegi' : 'WhatsApp mein contact chunein'}
                     </p>
+                    {bestDays.get(cust.id)?.label && (
+                      <p className={`text-[10px] font-bold ${goodDayToday(cust.id) ? 'text-emerald-700' : 'text-[#5F7A6E]'}`}>
+                        {goodDayToday(cust.id) ? '✅ Aaj/kal achha din • ' : ''}Aksar {bestDays.get(cust.id)!.label} ko chukate
+                      </p>
+                    )}
                   </div>
 
                   <div className="text-right shrink-0">
