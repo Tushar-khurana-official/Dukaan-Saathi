@@ -34,7 +34,8 @@ app.set('trust proxy', true);
 app.use(express.json({ limit: '4mb' }));
 
 const apiKey = process.env.GEMINI_API_KEY || '';
-const ai = apiKey && apiKey !== 'MY_GEMINI_API_KEY' ? new GoogleGenAI({ apiKey }) : null;
+// A hard timeout so a slow model never leaves the shopkeeper staring at a spinner.
+const ai = apiKey && apiKey !== 'MY_GEMINI_API_KEY' ? new GoogleGenAI({ apiKey, httpOptions: { timeout: 25_000 } }) : null;
 
 /* ------------------------------------------------------------------ */
 /* Logging without personal data                                       */
@@ -202,10 +203,13 @@ app.post('/api/gemini/parse-khata', requireLogin, async (req: Request, res: Resp
 
   if (!typed && !audioBase64) return res.status(400).json({ error: 'text or audioBase64 required' });
 
-  // Typed text (or the browser's live transcript when there is no AI key): rule-based first.
+  // Typed text, or the browser's live transcript of a voice note: rule-based first. If that is confident
+  // we answer instantly and skip Gemini (fast and free); Gemini only handles the unclear cases.
   const rule = typed ? parseKhataText(typed, customers) : null;
-  const ruleIsConfident = rule && rule.intent !== 'unknown' && rule.confidence >= 0.85 && !rule.needs_clarification;
-  if (!ai || (rule && !audioBase64 && ruleIsConfident)) {
+  // Known intent + amount is enough: an unclear customer name is fixed on the confirm card, not by the AI.
+  const money = rule && (rule.intent === 'add_credit' || rule.intent === 'add_payment' || rule.intent === 'add_sale');
+  const ruleIsConfident = rule && rule.intent !== 'unknown' && (!money || rule.amount_paise !== null);
+  if (!ai || (rule && ruleIsConfident)) {
     if (rule) {
       usage[audioBase64 ? 'voice_entry' : 'text_entry'].ruleOnly++;
       log('parse_rule_only', { has_audio: Boolean(audioBase64), ms: Date.now() - started });
@@ -241,6 +245,7 @@ Write the transcript exactly as spoken (Latin or Devanagari script). Do not inve
       model: MODEL,
       contents: { parts },
       config: {
+        httpOptions: { timeout: 15_000 },
         systemInstruction,
         responseMimeType: 'application/json',
         responseSchema: {
@@ -425,7 +430,7 @@ function demoFestivalStock(festival: string) {
   };
   return {
     festival,
-    summary: `Demo suggestions (no AI key) for ${festival}. Check your own past sales before ordering.`,
+    summary: '',
     items: items[festival] ?? items.Diwali,
     isDemo: true,
   };

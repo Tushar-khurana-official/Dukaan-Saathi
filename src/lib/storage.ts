@@ -15,6 +15,8 @@ export const KEYS = {
   CATALOG: 'dukaan_saathi_catalog_v2',
   SCANS: 'dukaan_saathi_scans_v2',
   REORDER: 'dukaan_saathi_reorder_v2',
+  /** Saathi chat history (this browser only, never synced). */
+  CHATS: 'dukaan_saathi_chats_v1',
 } as const;
 
 const V1 = {
